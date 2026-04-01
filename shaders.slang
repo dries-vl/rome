@@ -1,0 +1,1202 @@
+static const float PI                 = 3.1415926535f;                       // π constant for degree→radian conversions
+static const float fov_y_radians      = 60.0f * PI / 180.0f;                  // vertical field of view in radians (60°)
+static const float proj_scale_y       = 1.0f / tan(fov_y_radians * 0.5f);     // cot(FoV/2), projection scale factor for Y
+static const float aspect_ratio       = 16.0f / 9.0f;                         // screen aspect ratio (width / height)
+static const float proj_scale_x       = proj_scale_y / aspect_ratio;          // projection scale factor for X
+static const float near_plane         = 5.0f;                                 // near clipping plane distance
+static const float divide_by_127      = float(1.0/127.0);
+static const float divide_by_511      = float(1.0/511.0);
+static const float divide_by_32767    = float(1.0/32767.0);
+static const float tanHalfFovY        = tan(0.5 * fov_y_radians); // for frustrum culling
+static const float tanHalfFovX        = tanHalfFovY * aspect_ratio;
+
+struct object_metadata { uint meshes_offset, mesh_count; float radius;};
+[UnscopedEnum] enum object_type: int {TERRAIN, UNIT, BUILDING, VEGETATION};
+struct chunk { object_type object_type;};
+struct object { float2 pos; half2 vel; uint8_t cos, sin; uint8_t pad1,pad2;}; // ensure padding to 16b
+struct mdi {uint index_count, instance_count, first_index, base_vertex, first_instance;};
+struct di {uint group_count_x, group_count_y, group_count_z;};
+struct instance { uint object_id, animation;};
+struct unit { int16_t x, y, next_x, next_y;};
+struct bucket{uint ids[16];};
+
+// functional data
+[[vk::binding(17,0)]] RWStructuredBuffer<unit> UNITS;    // size is # of chunks
+[[vk::binding(0,0)]]  StructuredBuffer<chunk>  CHUNKS;    // size is # of chunks
+[[vk::binding(4,0)]]  RWStructuredBuffer<object>  OBJECTS;   // size is total # of objects in scene
+[[vk::binding(16,0)]] RWStructuredBuffer<bucket> BUCKETS; // 8mb for 131k buckets, need about 4x the amount of used 2mx2m tiles, appr. 2x the amount of units, this should work up to 60k units
+// base rendering data
+[[vk::binding(14,0)]] StructuredBuffer<uint>            OBJECT_MESH_LIST; // for each object type the mesh ids that make up objects in order
+[[vk::binding(15,0)]] StructuredBuffer<object_metadata> OBJECT_METADATA; // data about object type
+[[vk::binding(9,0)]]  StructuredBuffer<mdi>             MESH_INFO; // render info for mesh (instance_count is 'max visible of this mesh in this scene')
+[[vk::binding(11,0)]] StructuredBuffer<uint>   POSITIONS; // R10G10B10A2
+[[vk::binding(12,0)]] StructuredBuffer<uint>   NORMALS;   // R10G10B10A2_SNORM
+[[vk::binding(13,0)]] StructuredBuffer<uint>   UVS;       // R16G16_UNORM
+// intermediary buffers
+[[vk::binding(1,0)]]  RWStructuredBuffer<uint>  VISIBLE_CHUNK_IDS;     // size is # of chunks
+[[vk::binding(2,0)]]  RWStructuredBuffer<di>    INDIRECT_WORKGROUPS;   // append per 64 directly in chunk pass
+[[vk::binding(5,0)]]  RWStructuredBuffer<uint>  COUNT_PER_MESH;       // size is # of mesh types
+[[vk::binding(6,0)]]  RWStructuredBuffer<uint>  OFFSET_PER_MESH;      // size is # of mesh types
+// final resulting rendering data
+[[vk::binding(10,0)]] RWStructuredBuffer<mdi>      DRAW_CALLS;         // MDI, one struct per mesh type, index is mesh id
+[[vk::binding(8,0)]]  RWStructuredBuffer<instance> RENDERED_INSTANCES; // size is max # of visible mesh instances
+// uniforms
+[[vk::binding(18,0)]]
+cbuffer uniforms {
+    float3 camera_position;
+    float  camera_pitch_sin, camera_pitch_cos;
+    float  camera_yaw_sin, camera_yaw_cos;
+    float  time, delta; // seconds
+    uint   selected_object_id;
+    float  drag_rect_start_x, drag_rect_start_y, drag_rect_end_x, drag_rect_end_y;
+    float  click_world_pos_x, click_world_pos_z, drag_world_pos_x, drag_world_pos_z;
+};
+[[vk::binding(19, 0)]] Sampler2D TEXTURES[64];
+[[vk::binding(20, 0)]] Sampler2D DATA[2];
+[UnscopedEnum] enum mode: int {CHUNK_PASS, OBJECT_PASS, PREFIX_PASS, SCATTER_PASS, UI_MODE, FENCE_MODE, SEA_MODE, MESH_MODE, SKY_MODE};
+// push constants
+struct push_constants {
+    mode mode;
+};
+[[vk::push_constant]] push_constants PUSH_CONSTANTS;
+
+static const float d[4] = { 1024.0, 256.0, 64.0, 16.0 };
+uint choose_lod_step(float distance, float radius) {
+    if (radius <= 0) radius = 10.0;
+    distance = distance / radius;
+    if (distance >= d[0]) return 4;
+    if (distance >= d[1]) return 3;
+    if (distance >= d[2]) return 2;
+    if (distance >= d[3]) return 1;
+    return 0;
+}
+
+static const float SEA_LEVEL = 64.0f;
+static const float TILE_WIDTH = 128.0;
+static const float TILES_PER_CHUNK = 8.0; // width
+static const float CHUNKS_PLAYABLE = 4.0; // width
+static const float CHUNKS_TOTAL = 80.0; // width
+static const float PLAYABLE_WIDTH = TILE_WIDTH * TILES_PER_CHUNK * CHUNKS_PLAYABLE;
+static const float TOTAL_WIDTH = TILE_WIDTH * TILES_PER_CHUNK * CHUNKS_TOTAL;
+
+float2 chunk_uv_at(float2 worldXZ_m) {
+    float2 uv = (worldXZ_m + float2(TOTAL_WIDTH * 0.5f, TOTAL_WIDTH * 0.5f)) / float2(TOTAL_WIDTH, TOTAL_WIDTH);
+    uv = float2(0, 1) - float2(-uv.x, uv.y);
+    return uv;
+}
+
+float chunk_height_at_uv(float2 uv, bool fs) {
+    float h, detail;
+    // if (fs) {
+        // h = TEXTURES[2].Sample(uv).x * 1000000.0f;
+        // detail = TEXTURES[4].Sample(uv).x;
+    // } else {
+        h = DATA[1].SampleLevel(uv, 0).x * 400000.0f;
+        detail = TEXTURES[4].SampleLevel(uv, 0).x;
+    // }
+    // optional micro detail
+    h += (detail - 0.25f) * 1000.0f;
+    // sea plane height in same units as h
+    // signed height relative to sea
+    float d = h - SEA_LEVEL;
+    // beach band width
+    float beachWidth = 4000.0f;
+    // 0 at sea level edge, 1 away from coast, symmetric
+    float coast = saturate(abs(d) / beachWidth);
+    // strongest exactly near coast, fades away inland and offshore
+    float beachShape = 1.0f - coast;
+    beachShape = beachShape * beachShape;
+    // flatten coast slightly into a gentler transition
+    h -= beachShape * 2000.0f;
+    return h;
+}
+
+float3 get_camera_position() {
+    float2 uv = chunk_uv_at(camera_position.xz / 10); // camera is in dm -> convert to m
+    return camera_position + float3(0, chunk_height_at_uv(uv, false) / 10, 0); // chunk height is in cm -> convert to dm
+}
+
+static const uint bucket_size = 2; // size in meters of each bucket ~2mx2m
+static const uint map_size = 4096; // 4096m
+static const uint buckets_width = map_size / bucket_size;
+uint get_bucket_id(float x, float y) {
+    uint bx = uint(floor(x / bucket_size));
+    uint by = uint(floor(y / bucket_size));
+    uint h = bx * 0x8da6b343u ^ by * 0xd8163841u;
+    h ^= h >> 16;
+    return h & 0x1FFFFu;
+}
+
+// Width assigned to one chunk, proportional to men alive.
+// For now men_alive == 64 for every chunk, so widths are equal.
+// total_width is the intended width of the whole formation in cells.
+int get_chunk_width(int men_alive, int total_men_alive, int total_width) {
+    if (men_alive <= 0 || total_men_alive <= 0 || total_width <= 0) return 0;
+    // Rounded proportional width, minimum 1 if chunk has men.
+    int w = (men_alive * total_width + total_men_alive / 2) / total_men_alive;
+    return max(1, w);
+}
+// Local slot inside one chunk.
+// Units fill rows left-to-right.
+int2 get_local_slot_in_chunk(int local_unit_index, int chunk_width) {
+    int x = local_unit_index % chunk_width;
+    int y = local_unit_index / chunk_width;
+    return int2(x, y);
+}
+
+groupshared uint counts[25];
+
+[shader("compute")] [numthreads(64,1,1)]
+void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_DispatchThreadID) {
+    // workgroup setup
+    if (gtid.x < 25) // init to zero
+        counts[gtid.x] = 0;
+    GroupMemoryBarrierWithGroupSync();
+
+    switch (PUSH_CONSTANTS.mode) {
+    case CHUNK_PASS: {
+        if (tid.x == 0) {
+            INDIRECT_WORKGROUPS[0].group_count_x = 0;
+            INDIRECT_WORKGROUPS[0].group_count_y = 0;
+            INDIRECT_WORKGROUPS[0].group_count_z = 0;
+            for (int mesh_id = 0; mesh_id < 10; mesh_id++) {
+                COUNT_PER_MESH[mesh_id] = 0;
+                OFFSET_PER_MESH[mesh_id] = 0; // optional but useful for debug
+            }
+        }
+        uint stride, chunk_count;
+        CHUNKS.GetDimensions(chunk_count, stride);
+        uint chunk_id = tid.x;
+        bool real_chunk = chunk_id < chunk_count;
+        if (real_chunk) {
+            float3 delta_position;
+            float3 chunk_position;
+            bool terrain_chunk = chunk_id < 6400;
+            if (terrain_chunk) {
+                // assuming each tile is 1024m wide, and we use meters instead of dm now
+                chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
+                delta_position = chunk_position - (get_camera_position() / 10); // in meters
+            } else {
+                object object = OBJECTS[chunk_id * 64];    // 8 bytes
+                chunk_position = float3(object.pos.x * 10, 0, object.pos.y * 10);
+                delta_position = chunk_position - get_camera_position();
+            }
+            // frustum
+            float position_yaw_z =  camera_yaw_sin * delta_position.x + camera_yaw_cos * delta_position.z; // apply yaw to Z
+            float3 view = float3(
+                 camera_yaw_cos   * delta_position.x - camera_yaw_sin   * delta_position.z, // apply yaw to X
+                 camera_pitch_cos * delta_position.y + camera_pitch_sin * position_yaw_z, // apply pitch to Y (using new z)
+                -camera_pitch_sin * delta_position.y + camera_pitch_cos * position_yaw_z // apply pitch to Z (using new z)
+            );
+            uint radius = 1524;
+            bool valid = true;
+            // bool frustum = (abs(view.x) - radius) > (view.z * tanHalfFovX) || (abs(view.y) - radius) > (view.z * tanHalfFovY);
+            // if (frustum && view.z > 0) valid = false;
+            if (valid) {
+                // distance
+                float distance = dot(delta_position, delta_position) / 500.0f;
+                // hardcode the inner 4km -> 4x4=16 chunks -> each 8x8=64 tiles -> each side 4x8=32 tiles x 8 verts = 256x256=65k vertices
+                // each chunk there is 8 tiles x 8 vertices = 64x64=4096 vertices (lod1)
+                // outer rim is remaining 6400-16 chunks -> ca. 6400 tiles -> each side 80 tiles x 4 verts = 320x320=102k vertices
+                // 160x160 -> 160x160=25600 tiles -> each side 160 tiles x 4 verts = 640x640=409k vertices
+                // 25600 tiles / 64 = 400 chunks, at 1 quad of 4 vert each -> 25600 x 4 = 102k vertices
+                // each chunk there is 4x4=16 vertices (lod5)
+                if (chunk_id < 6400 && (chunk_position.x < -2048 || chunk_position.x >= 2048 || chunk_position.z < -2048 || chunk_position.z >= 2048)) {
+                // if (chunk_id < 6400) {
+                //if (chunk_id < 6400 && distance > d[0] + 50000) {
+                    // if really far, just directly write one visible instance, instead of 64 tile objects
+                    uint stride; uint mesh_count;
+                    MESH_INFO.GetDimensions(mesh_count, stride);
+                    int object_type = (int) CHUNKS[chunk_id].object_type;
+                    // uint lod_level = choose_lod_step(distance, OBJECT_METADATA[object_type].radius * 20);
+                    uint lod_level = 2;
+                    uint slot; InterlockedAdd(counts[lod_level], 1, slot);
+                } else {
+                    // else spawn a workgroup of 64 objects
+                    uint slot; InterlockedAdd(INDIRECT_WORKGROUPS[0].group_count_x, 1, slot);
+                    INDIRECT_WORKGROUPS[0].group_count_y = 1;
+                    INDIRECT_WORKGROUPS[0].group_count_z = 1;
+                    VISIBLE_CHUNK_IDS[slot] = chunk_id;
+                }
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+        if (real_chunk && gtid.x == 0) {
+            // bodies: 5 LODs
+            int object_type = (int) CHUNKS[chunk_id].object_type;
+            uint mesh_offset = OBJECT_METADATA[object_type].meshes_offset;
+            uint base_mesh_id = OBJECT_MESH_LIST[mesh_offset];
+            [unroll]
+            for (uint lod = 0; lod < 5; ++lod) {
+                uint c = counts[lod];
+                if (c != 0) {
+                    InterlockedAdd(COUNT_PER_MESH[base_mesh_id + lod], c);
+                }
+            }
+        }
+    } break;
+    case OBJECT_PASS: 
+    case SCATTER_PASS: {
+        // same fetches for whole workgroup
+        uint stride, mesh_count, object_count;
+        OBJECTS.GetDimensions(object_count, stride);
+        MESH_INFO.GetDimensions(mesh_count, stride);
+
+        uint chunk_id;
+        bool is_chunk_object = false;
+        if (PUSH_CONSTANTS.mode == SCATTER_PASS) {
+            is_chunk_object = gid.x < 100;
+            chunk_id = is_chunk_object
+                ? tid.x
+                : VISIBLE_CHUNK_IDS[gid.x - 100];
+        } else {
+            // OBJECT_PASS
+            chunk_id = VISIBLE_CHUNK_IDS[gid.x];
+        }
+
+        // fetches per object
+        uint id_within_chunk = gtid.x;
+        uint object_id = (chunk_id * 64) + id_within_chunk; // id in global objects buffer
+        if (object_id >= object_count) return; // early out
+
+        // unpack object position and move to camera space
+        object_type object_type = CHUNKS[chunk_id].object_type;
+        float3 position = float3(0);
+        float3 chunk_position = float3(0);
+        // todo: this code is totally busted, changing minor things makes terrain disappear; memory issue in prefix pass (?)
+        if (is_chunk_object) {
+            object_id = chunk_id * 64;
+            chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
+            position = chunk_position - (camera_position / 10); // in meters
+        } else if (object_type == TERRAIN) {
+            chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
+            float3 object_position = float3(int(id_within_chunk / 8) * 128 - 512 + 64, 0, int(id_within_chunk % 8) * 128 - 512 + 64);
+            object_position += chunk_position;
+            position = object_position - (camera_position / 10); // in meters
+        } else if (object_type == UNIT) {
+            object object = OBJECTS[object_id]; // 8 bytes
+            // MOVEMENT
+            unit unit = UNITS[0];
+            float2 world_pos = object.pos;
+
+            if (PUSH_CONSTANTS.mode == OBJECT_PASS) {
+                uint bucket_id = get_bucket_id(world_pos.x + 2048, world_pos.y + 2048);
+                uint slot;
+                InterlockedAdd(BUCKETS[bucket_id].ids[0], 1, slot);
+                slot++;
+                if (slot <= 15) BUCKETS[bucket_id].ids[slot] = object_id;
+            }
+
+            if (PUSH_CONSTANTS.mode == SCATTER_PASS) {
+                static const float move_speed = 5.0;
+                static const float body_radius = 0.6;
+                static const float block_radius = body_radius * 1.0;
+                static const float avoid_radius = 2.0;
+                static const float responsiveness = 1.0;
+                static const float repulse_weight = 1.0;
+                static const float penetration_weight = 10.0;
+                static const float epsilon = 1e-4;
+                static const float spacing = 1.0;
+                static const int chunk_count = 10;
+                static const int chunk_capacity = 64;
+                float2 world_pos = OBJECTS[object_id].pos;
+                float2 velocity  = OBJECTS[object_id].vel;
+                float2 formation_origin = float2(drag_world_pos_x, drag_world_pos_z);
+                // Intended width of the entire formation in cells.
+                int total_formation_width = (int)ceil(distance(float2(click_world_pos_x, click_world_pos_z), float2(drag_world_pos_x, drag_world_pos_z)));
+                // For now this is fixed. Later fill from real chunk state.
+                int men_per_chunk[chunk_count] = { 64,64,64,64,64,64,64,64,64,64 };
+                // You need these two values per unit.
+                int local_unit_index = object_id % chunk_capacity; // placeholder mapping
+                int chunk_id = (object_id % 640) / chunk_capacity;         // placeholder mapping
+                int total_men_alive = 0;
+                for (int i = 0; i < chunk_count; ++i) {
+                    total_men_alive += men_per_chunk[i];
+                }
+                int chunk_width = get_chunk_width(men_per_chunk[chunk_id], total_men_alive, total_formation_width);
+                int total_men_to_left = 0;
+                for (int i = 0; i < chunk_count; ++i) {
+                    total_men_to_left += men_per_chunk[i];
+                }
+                int start_x = 0;
+                for (int i = 0; i < chunk_id; ++i) {
+                    start_x += get_chunk_width(men_per_chunk[i], total_men_to_left, total_formation_width);
+                }
+                int chunk_start_x = start_x;
+                // Slot inside this chunk.
+                int2 local_slot = get_local_slot_in_chunk(local_unit_index, chunk_width);
+                // Final cell in the global formation.
+                int2 formation_cell = int2(chunk_start_x + local_slot.x, local_slot.y);
+                // Convert to world.
+                float2 desired_position = formation_origin + float2(
+                    (float)formation_cell.x * spacing,
+                    (float)formation_cell.y * spacing
+                );
+                // ------------------------------------------------------------
+                // Move toward assigned slot
+                // ------------------------------------------------------------
+                float2 to_target = desired_position - world_pos;
+                float dist_to_target = length(to_target);
+                float2 desired_dir = (dist_to_target > epsilon) ? (to_target / dist_to_target) : float2(0.0, 0.0);
+                float arrive_scale = saturate(dist_to_target / 1.0);
+                float2 desired_velocity = desired_dir * (move_speed * arrive_scale);
+                // ------------------------------------------------------------
+                // Collision / repulsion
+                // ------------------------------------------------------------
+                float2 repulse = float2(0.0, 0.0);
+                for (int bx = -1; bx <= 1; ++bx) {
+                    for (int by = -1; by <= 1; ++by) {
+                        uint bucket_id = get_bucket_id(
+                            world_pos.x + 2048 + bx * bucket_size,
+                            world_pos.y + 2048 + by * bucket_size
+                        );
+                        uint count = min(BUCKETS[bucket_id].ids[0], 15);
+                        for (uint i = 1; i <= count; ++i) {
+                            uint other_id = BUCKETS[bucket_id].ids[i];
+                            if (other_id == object_id) continue;
+                            float2 other_pos = OBJECTS[other_id].pos;
+                            float2 offset = world_pos - other_pos;
+                            float dist = length(offset);
+                            if (dist < epsilon || dist > avoid_radius) continue;
+                            float2 away = offset / dist;
+                            float t = saturate((avoid_radius - dist) / max(epsilon, avoid_radius - block_radius));
+                            float strength = repulse_weight * t * t;
+                            if (dist < block_radius) {
+                                float penetration = block_radius - dist;
+                                strength += penetration * penetration_weight;
+                                float inward_speed = dot(velocity, -away);
+                                if (inward_speed > 0.0) {
+                                    velocity -= (-away) * inward_speed;
+                                }
+                            }
+                            repulse += away * strength;
+                        }
+                    }
+                }
+                float2 target_velocity = desired_velocity + repulse;
+                float target_speed = length(target_velocity);
+                if (target_speed > move_speed) {
+                    target_velocity = target_velocity / target_speed * move_speed;
+                }
+                float blend = min(1.0, responsiveness * delta);
+                velocity += (target_velocity - velocity) * blend;
+                float speed = length(velocity);
+                if (speed > move_speed) {
+                    velocity = velocity / speed * move_speed;
+                }
+                world_pos += velocity * delta;
+                OBJECTS[object_id].vel = (half2)velocity;
+                OBJECTS[object_id].pos = world_pos;
+            }
+            float px_size = 1.0 / 641.0;
+            float2 uv = chunk_uv_at(world_pos) + (px_size / 2);
+            float height = chunk_height_at_uv(uv, false) / 10;
+            position = float3(object.pos.x * 10, height, object.pos.y * 10) - get_camera_position();
+        }
+        float position_yaw_z = camera_yaw_sin * position.x + camera_yaw_cos * position.z; // apply yaw to Z
+        float3 view = float3(
+             camera_yaw_cos   * position.x - camera_yaw_sin   * position.z, // apply yaw to X
+             camera_pitch_cos * position.y + camera_pitch_sin * position_yaw_z, // apply pitch to Y (using new z)
+            -camera_pitch_sin * position.y + camera_pitch_cos * position_yaw_z // apply pitch to Z (using new z)
+        );
+
+        // pick lod level
+        uint mesh_offset = OBJECT_METADATA[object_type].meshes_offset;
+        uint base_mesh_id = OBJECT_MESH_LIST[mesh_offset];
+        float distance = dot(position,position) / 500.0f; // todo: maybe just length() instead
+        float radius = OBJECT_METADATA[object_type].radius;
+        if (is_chunk_object) radius = radius * 20;
+        uint lod_level = choose_lod_step(distance, radius);
+        if (object_type == TERRAIN) lod_level = 1;
+        if (is_chunk_object) lod_level = 2;
+        // if (object_type == UNIT) lod_level = 0;
+        bool outside_frustrum = (abs(view.x) - radius) > (view.z * tanHalfFovX) || (abs(view.y) - radius) > (view.z * tanHalfFovY);
+        bool valid = true;
+        // if (outside_frustrum) valid = false;
+        if (is_chunk_object && !(chunk_position.x < -2048 || chunk_position.x >= 2048 || chunk_position.z < -2048 || chunk_position.z >= 2048)) valid = false;
+
+        if (PUSH_CONSTANTS.mode == OBJECT_PASS) {
+            // append to count of the lod level of this object
+            if (valid) {
+                uint slot; InterlockedAdd(counts[lod_level], 1, slot);
+                if (chunk_id >= 6400) {
+                    // add a head
+                    uint slot2;  InterlockedAdd(counts[5 + lod_level], 1, slot2);
+                }
+            }
+            GroupMemoryBarrierWithGroupSync();
+            if (gtid.x == 0) {
+                // bodies: 5 LODs
+                [unroll]
+                for (uint lod = 0; lod < 5; ++lod) {
+                    uint c = counts[lod];
+                    if (c != 0) {
+                        // assumes whole workgroup is the same object type
+                        InterlockedAdd(COUNT_PER_MESH[base_mesh_id + lod], c);
+                    }
+                }
+                if (chunk_id >= 6400) {
+                    // heads: 5 LODs (offset +40)
+                    [unroll]
+                    for (uint lod = 0; lod < 5; ++lod) {
+                        uint c = counts[5 + lod];
+                        if (c != 0) {
+                            // 8 frames in animation, each frame has 5 lod levels -> 40 meshes further to next
+                            InterlockedAdd(COUNT_PER_MESH[base_mesh_id + 40 + lod], c);
+                        }
+                    }
+                }
+            }
+        } else if (PUSH_CONSTANTS.mode == SCATTER_PASS) {
+            // append to the contiguous instance list
+            if (valid) {
+                uint mesh_id = base_mesh_id + lod_level;
+                // Grab slot via atomic write head on the draw call
+                uint slot; InterlockedAdd(DRAW_CALLS[mesh_id].instance_count, 1, slot);
+                const uint dst = OFFSET_PER_MESH[mesh_id] + slot;
+                if (is_chunk_object) {
+                    RENDERED_INSTANCES[dst] = instance(chunk_id + 1000000, 0);
+                } else if (object_type == TERRAIN) {
+                    RENDERED_INSTANCES[dst] = instance(object_id, 0);
+                } else {
+                    // ANIMATION
+                    static const float FRAME_DURATION = 0.5f; // 4 frames per second
+                    static const float ANIMATION_DURATION = 2.0f;  // 4 frames, 0.5s each
+                    static const float PAIR_DURATION = ANIMATION_DURATION * 2.0f;
+                    uint animation = 0;
+                    uint next_animation = 1;
+                    float phase = frac(object_id * 0.756688471) * ANIMATION_DURATION; // randomized start time for animations, somewhere within the 2s
+                    float t_clip = time + phase; // progress with time
+                    float t_in_clip = frac(t_clip / PAIR_DURATION) * PAIR_DURATION; // 0 to 4s
+                    float frame_f = t_in_clip / FRAME_DURATION; // 0..8 (two clips is eight total frames)
+                    uint frame0 = (uint)frame_f; // 0..7
+                    uint clip0 = frame0 < 4 ? animation : next_animation;
+                    uint frame1 = (frame0 + 1u) % 8u; // 0..7
+                    uint clip1 = frame1 < 4 ? animation : next_animation;
+                    if (frame0 >= 4) frame0 = frame0 - 4; frame0 = (frame0 * 5) + (clip0 * 4 * 5);
+                    if (frame1 >= 4) frame1 = frame1 - 4; frame1 = (frame1 * 5) + (clip1 * 4 * 5);
+                    float alpha  = frac(frame_f); // interpolation factor between the frame
+                    uint packed_anim = ((frame0  & 0x3FF)) | ((frame1  & 0x3FF) << 10) | (((uint)round(alpha * 1023.0f) & 0x3FF) << 20);
+                    // ADD MESHES
+                    // add the body
+                    RENDERED_INSTANCES[dst] = instance(object_id, packed_anim);
+                    // add the head
+                    uint slot_head; InterlockedAdd(DRAW_CALLS[mesh_id + 40].instance_count, 1, slot_head);
+                    const uint head_dst = OFFSET_PER_MESH[mesh_id + 40] + slot_head;
+                    RENDERED_INSTANCES[head_dst] = instance(object_id, packed_anim);
+                }
+            }
+        }
+    } break;
+    case PREFIX_PASS: {
+        if (tid.x != 0) return; // run on a single thread; tiny work
+        uint mesh_count, stride; 
+        MESH_INFO.GetDimensions(mesh_count, stride);
+        // calculate the offset for the first instance of each mesh type
+        uint total_count = 0;
+        for (uint mesh_id = 0; mesh_id < mesh_count; ++mesh_id) {
+            OFFSET_PER_MESH[mesh_id] = total_count;
+            mdi mi = MESH_INFO[mesh_id];
+            DRAW_CALLS[mesh_id].index_count   = mi.index_count;
+            DRAW_CALLS[mesh_id].first_index   = mi.first_index;
+            DRAW_CALLS[mesh_id].base_vertex   = mi.base_vertex;
+            DRAW_CALLS[mesh_id].first_instance = total_count; // last count is the first here
+            DRAW_CALLS[mesh_id].instance_count = 0; // set in scatter pass to have an index returned
+            total_count += COUNT_PER_MESH[mesh_id];
+        }
+        // fill the indirect dispatch buffer for the scatter pass with the sum of visible objects
+        INDIRECT_WORKGROUPS[0].group_count_x += 100; // add 6400 threads for possible chunk-to-object tiles on the map
+    } break;
+    }
+}
+
+// FENCE
+static const float FENCE_S = 2048; // meters
+static const float FENCE_H = 200;   // meters
+static const float SEA_S = 81920 / 2;   // meters
+static const float3 SEA_V[4] = {
+    float3(-SEA_S, SEA_LEVEL, -SEA_S),
+    float3( SEA_S, SEA_LEVEL, -SEA_S),
+    float3( SEA_S, SEA_LEVEL,  SEA_S),
+    float3(-SEA_S, SEA_LEVEL,  SEA_S),
+};
+static const uint SEA_I[6] = {
+    0,1,2, 2,3,0
+};
+static const float3 FENCE_V[8] = {
+    float3(-FENCE_S, 0.0, -FENCE_S),
+    float3( FENCE_S, 0.0, -FENCE_S),
+    float3( FENCE_S, 0.0,  FENCE_S),
+    float3(-FENCE_S, 0.0,  FENCE_S),
+    float3(-FENCE_S, FENCE_H, -FENCE_S),
+    float3( FENCE_S, FENCE_H, -FENCE_S),
+    float3( FENCE_S, FENCE_H,  FENCE_S),
+    float3(-FENCE_S, FENCE_H,  FENCE_S),
+};
+static const uint FENCE_I[24] = {
+    1,0,5, 5,0,4,   // south
+    2,1,6, 6,1,5,   // east
+    3,2,7, 7,2,6,   // north
+    0,3,4, 4,3,7    // west
+};
+
+static const uint MAX_VERTICES = 32u;
+static const float VERTEX_WIDTH = TILE_WIDTH / float(((MAX_VERTICES >> 1) + 1) - 1); // >> 1 because terrain lod is always 1
+// returns UVs of the 3 terrain vertices of the triangle under the point
+float terrain_height_at(float2 worldXZ_m) {
+    float2 vertex_xz = worldXZ_m - worldXZ_m % 8;
+    float2 f = (worldXZ_m % 8) / 8.0;
+    // 4 surrounding lattice vertices in world meters
+    float2 p00 = vertex_xz;
+    float2 p10 = p00 + float2(8, 0);
+    float2 p01 = p00 + float2(0, 8);
+    float2 p11 = p00 + float2(8, 8);
+    float2 uvA, uvB, uvC;
+    // choose which tri (diagonal split consistent with a regular grid)
+    float px_size = 1.0 / 641.0;
+    if (f.x + f.y <= 1.0) {
+        uvA = chunk_uv_at(p00) + (px_size / 2);
+        uvB = chunk_uv_at(p10) + (px_size / 2);
+        uvC = chunk_uv_at(p01) + (px_size / 2);
+        // weights would be: (1-fx-fy, fx, fy) for (A,B,C)
+    } else {
+        uvA = chunk_uv_at(p11) + (px_size / 2);
+        uvB = chunk_uv_at(p01) + (px_size / 2);
+        uvC = chunk_uv_at(p10) + (px_size / 2);
+        // weights would be: (fx+fy-1, 1-fx, 1-fy) for (A,B,C) in (A,B,C) order
+    }
+    // sample heights at the three terrain vertices
+    float hA = chunk_height_at_uv(uvA, false);
+    float hB = chunk_height_at_uv(uvB, false);
+    float hC = chunk_height_at_uv(uvC, false);
+    // barycentric interpolation (same split rule as helper)
+    float height;
+    if (f.x + f.y <= 1.0) {
+        // tri (A,B,C) = (00,10,01)
+        height = (1.0 - f.x - f.y) * hA
+               + f.x * hB
+               + f.y * hC;
+    } else {
+        // tri (A,B,C) = (11,01,10)
+        height = (f.x + f.y - 1.0) * hA
+               + (1.0 - f.x) * hB
+               + (1.0 - f.y) * hC;
+    }
+    return height;
+}
+
+bool at_battle_map_edge(float2 world_pos) {
+    bool seam_west  = abs(world_pos.x + PLAYABLE_WIDTH/2) < 16;
+    bool seam_east  = abs(world_pos.x - PLAYABLE_WIDTH/2) < 16;
+    bool seam_north = abs(world_pos.y + PLAYABLE_WIDTH/2) < 16; // if world_pos is float2(x,z), use .y for z
+    bool seam_south = abs(world_pos.y - PLAYABLE_WIDTH/2) < 16;
+    return seam_west || seam_east || seam_north || seam_south;
+}
+
+struct vs_out {
+    float4 pos    : SV_Position;                                           // clip-space position
+    float2 uv     : TEXCOORD0;                                             // texture coordinates
+    float3 normal : TEXCOORD1;                                             // surface normal
+    bool is_chunk : TEXCOORD2;
+    uint object_id : TEXCOORD3;
+    float h : TEXCOORD4;
+    float2 world_pos: TEXCOORD5;
+};
+
+[shader("vertex")]
+vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTANCE, uint DRAW_ID : SV_DrawIndex) {
+    // SKY path: fullscreen triangle
+    if (PUSH_CONSTANTS.mode == SKY_MODE || PUSH_CONSTANTS.mode == UI_MODE) { // sky and ui both
+        vs_out o;
+        float2 p;
+        if (VERTEX_ID == 1) p = float2(-1.0,  3.0); // was (-1,-1)
+        if (VERTEX_ID == 0) p = float2( 3.0, -1.0);
+        if (VERTEX_ID == 2) p = float2(-1.0, -1.0); // was (-1, 3)
+        o.pos = float4(p, 0.0000001, 1.0); // 1.0 / 1.0 -> drawn behind everything else
+        o.normal = float3(0.3, 0.5, 1.0);
+        o.object_id = 0;
+        float2 ndc = p * 0.5f + 0.5f;
+        o.uv = float2(ndc.x, 1.0 - ndc.y);
+        if (PUSH_CONSTANTS.mode == UI_MODE) o.pos.z = 1.0; // ui on top of everything
+        o.world_pos = 0;
+        return o;
+    } 
+    
+    if (PUSH_CONSTANTS.mode == FENCE_MODE || PUSH_CONSTANTS.mode == SEA_MODE) { // fence and sea
+        float3 p;
+        if (PUSH_CONSTANTS.mode == FENCE_MODE)
+            p = FENCE_V[FENCE_I[VERTEX_ID]];
+        else {
+            p = SEA_V[SEA_I[VERTEX_ID]];
+            p.y += 5.0 * sin(time);
+        }
+        float3 d = p - (get_camera_position() / 10.0);
+        // yaw + pitch
+        float zYaw = camera_yaw_sin * d.x + camera_yaw_cos * d.z;
+        float3 vM = float3(
+            camera_yaw_cos   * d.x - camera_yaw_sin   * d.z,
+            camera_pitch_cos * d.y + camera_pitch_sin * zYaw,
+           -camera_pitch_sin * d.y + camera_pitch_cos * zYaw
+        );
+        // meters -> cm for projection
+        float vx = vM.x * 100.0;
+        float vy = vM.y * 100.0;
+        float vz = vM.z * 100.0;
+        vs_out o;
+        o.pos = float4(proj_scale_x * vx, proj_scale_y * vy, near_plane, vz);
+        o.uv = 0;
+        if (PUSH_CONSTANTS.mode == SEA_MODE) {
+            o.uv = (p.xz + SEA_S) * (1.0f / (2.0f * SEA_S));
+            o.uv.y = 1.0f - o.uv.y;
+        }
+        o.normal = 0;
+        o.world_pos = p.xz;
+        o.object_id = 900000000u; // optional pick id
+        return o;
+    }
+
+    // fetch and unpack visible instance data, convert dm to cm (12 bytes)
+    float object_yaw_cos = 1.0;
+    float object_yaw_sin = 0.0;
+    float3 position;
+    float3 vertex;
+    float3 normal;
+    float2 world_pos = float2(0.0, 0.0);
+    float h = 0.0;
+    float2 uv;
+    float px_size = 1.0f / 641.0f;
+
+    // draw id is essentially just the mesh id in this case
+    uint object_id = INSTANCE.object_id;
+    bool is_chunk = object_id > 1000000;
+    bool is_terrain = DRAW_ID < 5; // first five draw ids are the five terrain lod levels
+    static const float TILE_SIZE_CM = 128.0 * 100.0; // in cm
+    if (is_terrain) {
+        object_id = is_chunk ? object_id - 1000000 : object_id;
+        uint chunk_id = is_chunk ? object_id : object_id / 64;
+        float3 chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
+        if (is_chunk) {
+            position = 10 * (chunk_position - (get_camera_position() / 10)); // in meters
+            uint vertices_per_side = (MAX_VERTICES >> DRAW_ID) + 1;     // 32, 16, 8, 4, 2 (ie. scale 6 becomes 2 -> quad)
+            uint row = VERTEX_ID % vertices_per_side;        // 0 .. vertices_per_side-1
+            uint col = VERTEX_ID / vertices_per_side;        // 0 .. vertices_per_side-1
+            // Normalize to [0,1] then scale to the fixed tile size
+            float x = (float(col) / float(vertices_per_side - 1)) * TILE_SIZE_CM - (TILE_SIZE_CM / 2);
+            float z = (float(row) / float(vertices_per_side - 1)) * TILE_SIZE_CM - (TILE_SIZE_CM / 2);
+            vertex = 8 * float3(x, 0.0, z);
+            world_pos = chunk_position.xz + (vertex.xz / 100.0f);
+            uv = chunk_uv_at(world_pos);
+            h = chunk_height_at_uv(uv + (px_size / 2), false);
+            vertex.y += h;
+        } else {
+            uint id_within_chunk = object_id - (chunk_id * 64);
+            float3 object_position = float3(int(id_within_chunk / 8) * 128 - 512 + 64, 0, int(id_within_chunk % 8) * 128 - 512 + 64);
+            object_position += chunk_position;
+            position = 10 * (object_position - (get_camera_position() / 10)); // in meters
+            uint vertices_per_side = (MAX_VERTICES >> DRAW_ID) + 1;     // 32, 16, 8, 4, 2 (ie. scale 6 becomes 2 -> quad)
+            uint row = VERTEX_ID % vertices_per_side;        // 0 .. vertices_per_side-1
+            uint col = VERTEX_ID / vertices_per_side;        // 0 .. vertices_per_side-1
+            // Normalize to [0,1] then scale to the fixed tile size
+            float x = (float(col) / float(vertices_per_side - 1)) * TILE_SIZE_CM - (TILE_SIZE_CM / 2);
+            float z = (float(row) / float(vertices_per_side - 1)) * TILE_SIZE_CM - (TILE_SIZE_CM / 2);
+            vertex = float3(x, 0.0, z);
+            world_pos = object_position.xz + (vertex.xz / 100.0f);
+            uv = chunk_uv_at(world_pos);
+            h = chunk_height_at_uv(uv + (px_size / 2), false);
+            if (at_battle_map_edge(world_pos)) h += 1000.0; // RAISE THE EDGE TO HIDE SEAMS AND CREATE BARRIER
+            vertex.y += h;
+        }
+        // normal
+        float texel = 1.0 / 641.0;
+        float hL = chunk_height_at_uv(uv + float2(-texel,0), false);
+        float hR = chunk_height_at_uv(uv + float2( texel,0), false);
+        float hD = chunk_height_at_uv(uv + float2(0,-texel), false);
+        float hU = chunk_height_at_uv(uv + float2(0, texel), false);
+        float dx = TOTAL_WIDTH / 640.0 * 100.0;   // convert meters → cm to match vertex space
+        float dz = dx;
+        float3 dPdx = float3(2.0*dx, hR - hL, 0.0);
+        float3 dPdz = float3(0.0, hU - hD, 2.0*dz);
+        normal = normalize(cross(dPdz, dPdx));
+    } else {
+        // unit
+        object object = OBJECTS[object_id];    // 8 bytes
+        unit UNIT = UNITS[0];
+        int rank = object_id % 64;
+        float2 formation = float2(rank % 8, rank / 8) * 10.0f;
+        // float3 object_position = float3(formation.x, 0, formation.y);
+        float3 object_position = float3(object.pos.x, 0, object.pos.y);
+        world_pos = object.pos;
+        position = (object_position * 10.0) - get_camera_position();
+        float object_yaw_cos = float(object.cos) * divide_by_127;
+        float object_yaw_sin = float(object.sin) * divide_by_127;
+        uint packed_anim = INSTANCE.animation;
+        uint frame0  =  packed_anim        & 0x3FF;        // 10 bits
+        uint frame1  = (packed_anim >> 10) & 0x3FF;        // 10 bits
+        float alpha = (float)((packed_anim >> 20) & 0x3FF) / 1023.0f;   // 10 bits
+        uint base_vertex = MESH_INFO[DRAW_ID + frame0].base_vertex;
+        uint base_vertex_next = MESH_INFO[DRAW_ID + frame1].base_vertex;
+        // fetch and unpack vertex position, represented as cm (4 bytes)
+        uint packed_vertex = POSITIONS[VERTEX_ID + base_vertex];
+        uint packed_vertex_next = POSITIONS[VERTEX_ID + base_vertex_next];
+        vertex = float3(
+            float(((int)( packed_vertex        & 0x3FF) << 22) >> 22),
+            float(((int)((packed_vertex >> 10) & 0x3FF) << 22) >> 22),
+            float(((int)((packed_vertex >> 20) & 0x3FF) << 22) >> 22)
+        );
+        float3 vertex_next = float3(
+            float(((int)( packed_vertex_next        & 0x3FF) << 22) >> 22),
+            float(((int)((packed_vertex_next >> 10) & 0x3FF) << 22) >> 22),
+            float(((int)((packed_vertex_next >> 20) & 0x3FF) << 22) >> 22)
+        );
+        vertex = lerp(vertex, vertex_next, alpha);
+        // fetch and unpack vertex normal (4 bytes)
+        uint packed_normal = NORMALS[VERTEX_ID + base_vertex];
+        uint packed_normal_next = NORMALS[VERTEX_ID + base_vertex_next];
+        normal = float3(
+            float(((int)( packed_normal        & 0x3FF) << 22) >> 22) * divide_by_511,
+            float(((int)((packed_normal >> 10) & 0x3FF) << 22) >> 22) * divide_by_511,
+            float(((int)((packed_normal >> 20) & 0x3FF) << 22) >> 22) * divide_by_511
+        );
+        float3 normal_next = float3(
+            float(((int)( packed_normal_next        & 0x3FF) << 22) >> 22) * divide_by_511,
+            float(((int)((packed_normal_next >> 10) & 0x3FF) << 22) >> 22) * divide_by_511,
+            float(((int)((packed_normal_next >> 20) & 0x3FF) << 22) >> 22) * divide_by_511
+        );
+        normal = normalize(lerp(normal, normal_next, alpha));
+        // fetch and unpack uv (4 bytes)
+        uint packed_uv = UVS[VERTEX_ID + base_vertex];
+        uv = float2(
+            (packed_uv & 0xFFFF) * (1.0/65535.0),
+            (packed_uv >> 16)    * (1.0/65535.0)
+        );
+        // height
+        vertex.y += terrain_height_at(world_pos);
+    }
+
+    // rotate position around y for the combined camera-instance yaw
+    float cos_d = object_yaw_cos * camera_yaw_cos + object_yaw_sin * camera_yaw_sin; // cos(a-b)
+    float sin_d = object_yaw_sin * camera_yaw_cos - object_yaw_cos * camera_yaw_sin; // sin(a-b)
+    float x1 =  cos_d * vertex.x + sin_d * vertex.z;
+    float z1 = -sin_d * vertex.x + cos_d * vertex.z;
+    float y1 =  vertex.y;
+
+    // rotate position around x for the camera pitch
+    float y2 =  camera_pitch_cos * y1 + camera_pitch_sin * z1;
+    float z2 = -camera_pitch_sin * y1 + camera_pitch_cos * z1;
+    float x2 =  x1;
+
+    // move position into the calculated instance-in-camera-space
+    float position_yaw_z =  camera_yaw_sin * position.x + camera_yaw_cos * position.z; // apply yaw to Z
+    float3 view = float3(
+         camera_yaw_cos   * position.x - camera_yaw_sin   * position.z, // apply yaw to X
+         camera_pitch_cos * position.y + camera_pitch_sin * position_yaw_z, // apply pitch to Y (using new z)
+        -camera_pitch_sin * position.y + camera_pitch_cos * position_yaw_z // apply pitch to Z (using new z)
+    );
+    float vx = x2 + (10.0 * view.x); // times ten to go from m to cm
+    float vy = y2 + (10.0 * view.y);
+    float vz = z2 + (10.0 * view.z);
+
+    // perspective projection (reverse dept)
+    float cx = proj_scale_x * vx;
+    float cy = proj_scale_y * vy;
+    float cz = near_plane;
+    float w = vz;
+
+    vs_out o = vs_out(float4(-1));
+    o.pos = float4(cx, cy, cz, w);
+    o.normal = normal;
+    o.uv = uv;
+    o.is_chunk = is_chunk;
+    o.object_id = INSTANCE.object_id;
+    o.h = h;
+    o.world_pos = world_pos;
+    return o;
+}
+
+// 4x4 Bayer ordered dither threshold in [0,1)
+float Bayer4x4(uint2 p) {
+    uint x = p.x & 3;
+    uint y = p.y & 3;
+
+    // Values 0..15 laid out as a 4x4 Bayer matrix
+    uint b =
+        (y == 0) ? ((x==0)? 0 : (x==1)?  8 : (x==2)?  2 : 10) :
+        (y == 1) ? ((x==0)?12 : (x==1)?  4 : (x==2)? 14 :  6) :
+        (y == 2) ? ((x==0)? 3 : (x==1)? 11 : (x==2)?  1 :  9) :
+                   ((x==0)?15 : (x==1)?  7 : (x==2)? 13 :  5);
+
+    return (b + 0.5) / 16.0;
+}
+
+// idea: deterministic hash based on object id -> 0 or 1
+// 1 means bigger -> farther means bigger, up to certain max size
+// 0 means smaller -> farther means smaller, after certain distance ie. 50% smaller then cull -> no popping
+// -> two for one at distance
+// -> could scale up to four for one at even further distance
+// -> or even 8 for one for smaller things, even 16 for one for grass
+// -> extremely far away grass should just disappear entirely over distance
+// -> should dynamically go from 1 to 2 for 1 to 4 for 1 to 8 for 1 to 16 for 1, etc. until basically none
+
+float4 blurred_texture(float2 uv, float2 pixelCoord, float2 resolution, float blurAmount, int quality, int frame) {
+    const float TAU = 6.28318530718;
+    quality = clamp(quality, 1, 4);
+    float2 aspect = float2(1.0, 1.0);
+    if (resolution.x > resolution.y)
+        aspect.x = resolution.y / resolution.x;
+    else
+        aspect.y = resolution.x / resolution.y;
+    float2 blurRadius = blurAmount * aspect;
+    float noise = frac(
+        52.9829189 *
+        frac(dot(pixelCoord + (frame % 60) * float2(2.083, 4.867),
+                 float2(0.06711056, 0.00583715)))
+    );
+    float angle = noise * TAU;
+    float2 dir = float2(cos(angle), sin(angle));
+    float4 acc = 0.0;
+    [loop]
+    for (int i = 0; i < quality; ++i)
+    {
+        acc += TEXTURES[5].Sample(uv + dir * blurRadius);
+
+        // rotate 90 degrees
+        dir = float2(-dir.y, dir.x);
+    }
+    return acc / quality;
+}
+
+struct ps_out {
+    float4 color : SV_Target0; // normal color
+    uint   id    : SV_Target1; // object ID
+};
+static const float3 LIGHT_DIR = normalize(float3(0.0, 0.95, -1.0)); // points *from surface to light*
+static const float4 SKY_COLOR = float4(0.55, 0.65, 0.85, 1.0);
+static const float4 SEA_COLOR = float4(0.0, 0.2, 0.7, 1.0);
+[shader("fragment")]
+ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
+    ps_out o;
+    o.id = i.object_id;
+    if (PUSH_CONSTANTS.mode == SKY_MODE) o.color = SKY_COLOR;
+    else if (PUSH_CONSTANTS.mode == UI_MODE) {
+        bool inside =
+            i.uv.x >= drag_rect_start_x &&
+            i.uv.x <= drag_rect_end_x &&
+            i.uv.y >= drag_rect_start_y &&
+            i.uv.y <= drag_rect_end_y;
+        if (!inside) discard;
+        float px      = 1.0 / 1920.0; // or pass real width/height in
+        float py      = 1.0 / 1080.0;
+        float thick_x = 2.0 * px;
+        float thick_y = 2.0 * py;
+        bool on_border =
+            i.uv.x < drag_rect_start_x + thick_x ||
+            i.uv.x > drag_rect_end_x - thick_x ||
+            i.uv.y < drag_rect_start_y + thick_y ||
+            i.uv.y > drag_rect_end_y - thick_y;
+        // if (!on_border) discard;
+
+        float4 border_color = float4(0.2, 0.8, 1.0, 0.8); // strong
+        border_color = TEXTURES[0].Sample(i.uv);
+
+        o.color = border_color; }
+    else if (PUSH_CONSTANTS.mode == FENCE_MODE) o.color = float4(0.0, 0.0, 0.0, 1.0);
+    else if (PUSH_CONSTANTS.mode == SEA_MODE) o.color = SEA_COLOR;
+    else if (PUSH_CONSTANTS.mode == MESH_MODE) {
+        // debug draw triangles as distinct colors
+        // float3 color = frac(sin((primID+43) * 43.5453) * float3(23.1407, 85.928, 43.533));
+        // if(color.x+color.y+color.z < 0.1) color = float3(float(primID % 32) / 32, float((primID + 38) % 64) / 64, float((primID + 17) % 32) / 32);
+        // uint bucket_id = get_bucket_id(i.world_pos.x + 2048, i.world_pos.y + 2048);
+        // float g = frac(sin(primID * 12.9898) * 43758.5453);
+        // float g = frac(sin(bucket_id * 12.9898) * 43758.5453);
+        // float3 color = g.xxx;
+        // float3 color = frac(sin((i.object_id+43) * 43.5453) * float3(23.1407, 85.928, 43.533));
+        // if(color.x+color.y+color.z < 0.1) color = float3(float(i.object_id % 32) / 32, float((i.object_id + 38) % 64) / 64, float((i.object_id + 17) % 32) / 32);
+        // return float4(color, 1.0);
+        
+        // float4 map = TEXTURES[1].Sample(i.uv);
+        float2 puv = round(i.uv * 640) / 640; // which quad are we on (not vertex)
+        float px_size = 1.0f / 640.0f;        // offset by
+        
+        // LAND COLOR
+        {
+            // FRACTAL TEXTURE
+            float depth = distance(get_camera_position() / 10, float3(i.world_pos.x, i.h/100, i.world_pos.y)) / 100000;
+            float lod = log(depth);
+            float lodFloor = floor(lod);
+            float lodFract = frac(lod);
+            float s0 = exp(lodFloor - 1.0);
+            float s1 = exp(lodFloor + 0.0);
+            float s2 = exp(lodFloor + 1.0);
+            float2 scaled_uv = (i.uv * 100.0) % 1.0f;
+            float2 uv0 = i.uv / s0;
+            float2 uv1 = i.uv / s1;
+            float2 uv2 = i.uv / s2;
+            float4 tex0 = TEXTURES[5].Sample(uv0);
+            float4 tex1 = TEXTURES[5].Sample(uv1);
+            float4 tex2 = TEXTURES[5].Sample(uv2);
+            float4 t_color = (tex1 + lerp(tex0, tex2, lodFract)) * 0.5;
+            // t_color.rgb += (color / 2); // show actual triangle primitives
+
+            float h = i.h / 100.0f;              // same units as your ddx/ddy normal test
+            float d = h - SEA_LEVEL;
+            // masks
+            float underwater = 1.0f - smoothstep(-40.0f,   0.0f, d);
+            float shallow    = 1.0f - smoothstep(-100.0f, -5.0f, d);
+            float wet        = 1.0f - smoothstep(   0.0f,  20.0f, d);
+            float land       =        smoothstep( -5.0f,  40.0f, d);
+            float beach      =        smoothstep(  -2.0f,  17.0f, d) * (1.0f - smoothstep(40.0f, 90.0f, d));
+            float3 sand  = float3(0.78, 0.74, 0.62);
+            float3 grass = t_color.rgb;
+            float3 rock  = float3(0.42, 0.40, 0.38);
+            float slope = 1.0f - saturate(i.normal.y);
+            float rockiness = smoothstep(0.05f, 0.25f, slope);
+            float3 landColor = lerp(sand, grass, land);
+            landColor *= lerp(0.35.xxx, 1.0.xxx, 1.0 - wet);
+            landColor = lerp(landColor, float3(0.10, 0.24, 0.34), shallow * 0.75);
+            landColor = lerp(landColor, sand, beach * 0.85);
+            float3 terrainColor = lerp(landColor, rock, rockiness);
+            o.color.rgb = terrainColor;
+        }
+
+        // COLOR THE EDGE RED
+        if (at_battle_map_edge(i.world_pos) && !i.is_chunk) o.color.r = 1.0;
+        // ORIGIN
+        float distance_from_origin = distance(i.world_pos, float2(0, 0));
+        if (distance_from_origin < 1.0) o.color.g = 1.0;
+
+        // CLICK POSITION
+        if (drag_world_pos_x != 0 && drag_world_pos_z != 0 && (drag_world_pos_x != click_world_pos_x || drag_world_pos_z != click_world_pos_z)) {
+            float2 p1 = float2(click_world_pos_x, click_world_pos_z);
+            float2 p2 = float2(drag_world_pos_x,  drag_world_pos_z);
+            float2 q  = i.world_pos;   // if i.world_pos is float3, use i.world_pos.xz
+            // top edge basis
+            float2 d = p2 - p1;
+            float w = max(length(d), 1e-5);
+            float2 u = d / w;
+            float2 n = float2(u.y, -u.x);   // opposite orientation
+            // fixed circle settings
+            const float r    = 0.5;
+            const float N    = 64.0;
+            const float diam = 2.0 * r;
+            // debug endpoints
+            float dist_from_click = distance(q, p1);
+            float dist_from_drag  = distance(q, p2);
+            o.color.b += 1.0 - step(r, dist_from_click);
+            o.color.g += 1.0 - step(r, dist_from_drag);
+            // number of columns that fit along the drag span,
+            // but at least 1 and never more than N
+            float cols = floor(w / diam) + 1.0;
+            cols = clamp(cols, 1.0, N);
+            // rows needed for N circles
+            float rows = ceil(N / cols);
+            // local coordinates relative to first circle center
+            float2 v = q - p1;
+            float a = dot(v, u);
+            float b = dot(v, n);
+            // nearest grid index, with first center at (0, 0)
+            float ix = floor(a / diam + 0.5);
+            float iy = floor(b / diam + 0.5);
+            // nearest circle center in local coordinates
+            float cx = ix * diam;
+            float cy = iy * diam;
+            // rectangular range of valid indices
+            float inIndexRange =
+                step(0.0, ix) *
+                step(ix, cols - 1.0) *
+                step(0.0, iy) *
+                step(iy, rows - 1.0);
+            // valid circle mask for partial last row
+            float idx = iy * cols + ix;
+            float validCircle = step(idx, N - 1.0);
+            // circle membership
+            float2 dc = float2(a - cx, b - cy);
+            float inCircle = 1.0 - step(r * r, dot(dc, dc));
+            // final mask
+            float insideMask = inIndexRange * validCircle * inCircle;
+            o.color.r += 0.5 * insideMask;
+        }
+
+        // o.color.xyz += TEXTURES[2].Sample(i.uv).r;
+        // float h = chunk_height_at_uv_fs(i.uv) * 0.00033;
+        // if (h <= 2.0) {
+        //     o.color = SEA_COLOR + (h * float4(0.1, 0.2, 0.3, 0.0));
+        //     i.normal = 0;
+        // }
+        // if (!i.is_chunk) o.color.xyz = color;
+        uint bucket_id = get_bucket_id(i.world_pos.x + 2048, i.world_pos.y + 2048);
+        uint bucket_count = BUCKETS[bucket_id].ids[0];
+        if (bucket_count != 0) {
+            if (bucket_count < 15) {
+                o.color.g *= 1.0 + (bucket_count * 0.2);
+            } else {
+                o.color.b *= 1.0 + (bucket_count * 0.2);
+            }
+            // uint2 pix = (uint2)i.pos.xy;
+            // uint v = (pix.x & 3) | ((pix.y & 3) << 2);
+            // uint unit_id = BUCKETS[bucket_id].ids[v];
+            // object object = OBJECTS[unit_id];
+            // float distance = distance(i.world_pos, float2(object.x, object.z)) / 10.0;
+            // if (distance < 0.5)
+                // o.color.g *= (distance * 10.0);
+        }
+        // o.color *= 1.0 - saturate(i.h * 0.00025);
+    }
+
+    float2 p = i.uv * 640; // which quad are we on (not vertex)
+    if (!i.is_chunk) p *= 16;
+    bool odd_row = (int(p.y) % 2) != 0; // offset row or not
+    bool flipped_triangle = (primID % 2) != 0; // triangle is pointing down if true, up if false
+
+    float px_size = 1.0f / 640.0f; // offset by
+    float2 fs_uv = ((i.uv + (px_size / 2)) * 640.0) / 641.0;
+
+    // PASSABLE GRID
+    if (PUSH_CONSTANTS.mode == MESH_MODE) {
+        // float2 snapped_world_pos = i.world_pos - (i.world_pos % float2(4.0));
+        // float h00 = chunk_height_at_uv(chunk_uv_at(snapped_world_pos) + (px_size / 2), true);
+        // float h10 = chunk_height_at_uv(chunk_uv_at(snapped_world_pos + float2(4, 0)) + (px_size / 2), true);
+        // float h01 = chunk_height_at_uv(chunk_uv_at(snapped_world_pos + float2(0, 4)) + (px_size / 2), true);
+        // float h11 = chunk_height_at_uv(chunk_uv_at(snapped_world_pos + float2(4, 4)) + (px_size / 2), true);
+        // float hmin = min(min(h00, h10), min(h01, h11));
+        // float hmax = max(max(h00, h10), max(h01, h11));
+        // float steepness = hmax - hmin;
+        // if (steepness > 400.0) o.color.rb = float2(1,1);
+        // else if (steepness > 300.0) o.color.b = 1;
+        // else if (steepness > 200.0) o.color.g = 1;
+        // else if (steepness > 100.0) o.color.g = 0.5;
+        // else if (steepness > 50.0) o.color.g = 0.25;
+        // if (steepness > 250.0) o.color.r = 1;
+        // if (steepness < 80.0) o.color.g = 1;
+    }
+
+    if (PUSH_CONSTANTS.mode == SEA_MODE) {
+        float terrainH = chunk_height_at_uv(i.uv + (px_size / 2), true) / 100.0f;
+        float depth = max(0.0f, SEA_LEVEL - terrainH);
+        float shallowW = 1.0f - smoothstep(0.0f, 40.0f, depth);
+        float deepW    = smoothstep(10.0f, 120.0f, depth);
+        float3 shallowColor = float3(0.22, 0.48, 0.50);
+        float3 deepColor    = float3(0.02, 0.10, 0.22);
+        float3 waterColor = lerp(shallowColor, deepColor, deepW);
+        float foam = 1.0f - smoothstep(0.0f, 24.0f, depth);
+        waterColor = lerp(waterColor, float3(0.92, 0.95, 0.98), foam * 0.9);
+        o.color.rgb = waterColor;
+    }
+
+    if (PUSH_CONSTANTS.mode == MESH_MODE) {
+        // NORMAL SMOOTH
+        // float px = 1.0f / (641.0f); // offset by
+        // float hTL = chunk_height_at_uv_fs(fs_uv + float2(-px,  px));
+        // float hT  = chunk_height_at_uv_fs(fs_uv + float2( 0.0,      px));
+        // float hTR = chunk_height_at_uv_fs(fs_uv + float2( px,  px));
+        // float hL  = chunk_height_at_uv_fs(fs_uv + float2(-px,  0.0));
+        // float hR  = chunk_height_at_uv_fs(fs_uv + float2( px,  0.0));
+        // float hBL = chunk_height_at_uv_fs(fs_uv + float2(-px, -px));
+        // float hB  = chunk_height_at_uv_fs(fs_uv + float2( 0.0,     -px));
+        // float hBR = chunk_height_at_uv_fs(fs_uv + float2( px, -px));
+        // float heightScale = 10.0;
+        // hTL *= heightScale; hT *= heightScale; hTR *= heightScale;
+        // hL  *= heightScale;                hR  *= heightScale;
+        // hBL *= heightScale; hB *= heightScale; hBR *= heightScale;
+        // float dx = 5000.0;
+        // float dz = 5000.0;
+        // float dHdx = ((hTR + 2.0*hR + hBR) - (hTL + 2.0*hL + hBL)) / (8.0 * dx);
+        // float dHdz = ((hBL + 2.0*hB + hBR) - (hTL + 2.0*hT + hTR)) / (8.0 * dz);
+        // float3 N = normalize(float3(-dHdx, 1.0, -dHdz));
+        // i.normal = N;
+        
+        // NORMAL TRIANGLE
+        // int2 pi = int2(p);
+        // float sx = 2.0f * 5000.0f;
+        // float sz = 2.0f * 5000.0f;
+        // float h00 = chunk_height_at_uv_px(pi);
+        // float h11 = chunk_height_at_uv_px(pi + int2(1,1));
+        // bool odd = (primID & 1) != 0;
+        // float3 e1, e2;
+        // if (odd) {
+        //     float h10 = chunk_height_at_uv_px(pi + int2(1,0));
+        //     e1 = float3(sx,  (h10 - h00) * 10.0, 0.0f);   // 00 -> 10
+        //     e2 = float3(sx,  (h11 - h00) * 10.0, sz);     // 00 -> 11
+        //     i.normal = normalize(cross(e2, e1));    // if inverted, use cross(e1,e2)
+        // } else {
+        //     float h01 = chunk_height_at_uv_px(pi + int2(0,1));
+        //     e1 = float3(0.0f, (h01 - h00) * 10.0, sz);    // 00 -> 01
+        //     e2 = float3(sx,   (h11 - h00) * 10.0, sz);    // 00 -> 11
+        //     i.normal = -normalize(cross(e2, e1));    // if inverted, use cross(e1,e2)
+        // }
+        
+        // COLOR
+        // float4 map = TEXTURES[1].Sample(i.uv + (px_size / 2));
+        // o.color = map;
+
+        // OUTLINING THICKNESS
+        float2 f = frac(p);
+        float t = 0.01;        // thickness
+        float feather = 0.01; // softness
+        float px_p = max(fwidth(p.x), fwidth(p.y)); // how much does p change between two pixels
+        // MEASURING GRID
+        float grid_1m = min(min(1.0 - abs(i.world_pos.x % 1.0), abs(i.world_pos.x % 1.0)), min(1.0 - abs(i.world_pos.y % 1.0), abs(i.world_pos.y % 1.0)));
+        float grid_4m = min(min(4.0 - abs(i.world_pos.x % 4.0), abs(i.world_pos.x % 4.0)), min(4.0 - abs(i.world_pos.y % 4.0), abs(i.world_pos.y % 4.0))) / 4.0;
+        float m1 = 1.0 - smoothstep(t - feather, t + feather, grid_1m);
+        float m4 = 1.0 - smoothstep(t - feather, t + feather, grid_4m);
+        float enable_measure = smoothstep(0, px_p, t / 2); // 1 when change in grid position for one pixel is smaller than width t
+        float measure_mask = enable_measure * saturate(m1 + m4); // gradually dissolve the grid
+        o.color.rgb = lerp(o.color.rgb, 0.025.xxx, measure_mask);
+        // QUAD OUTLINES
+        const float INV_SQRT5_TIMES_2 = 0.894427191; // 2/sqrt(5)
+        float dU = min(f.x, 1.0 - f.x) * INV_SQRT5_TIMES_2;
+        float dV = min(f.y, 1.0 - f.y);
+        float dDiag = (odd_row && i.is_chunk)
+            ? abs((f.x + f.y - 1.0)) * INV_SQRT5_TIMES_2
+            : abs(f.x - f.y) * INV_SQRT5_TIMES_2;
+        float dEdge = min(dU, min(dV, dDiag));
+        float2 nearestV = round(p);
+        float d = length(p - nearestV);
+        float point = 1.0 - smoothstep((t * 4) - feather, (t * 4) + feather, d);
+        float outerLine = 1.0 - smoothstep(t - feather, t + feather, dEdge);
+        float diagLine = 1.0 - smoothstep(t - feather, t + feather, dDiag);
+        float enable = smoothstep(0, px_p, t); // 1 when change in grid position for one pixel is smaller than width t
+        float mask = enable * saturate(point + outerLine + diagLine); // gradually dissolve the grid
+        o.color.rgb = lerp(o.color.rgb, 0.0.xxx, mask);
+
+        // slope
+        // float slope = 1.0 - saturate(dot(i.normal, float3(0,1,0)));
+        // float slope_shade = 1.0 - slope * 1.0; // last 1.0 is 0.0 to 1.0 weak to strong effect
+        // if (slope > 0.08) o.color *= 0.1;
+        // o.color *= slope_shade;
+        
+        // debug frag normal (replace with vertex normal later)
+        // float3 P = float3(i.world_pos.x, i.h / 100.0f, i.world_pos.y); // h is 100x 
+        // float3 N = normalize(cross(ddx(P), ddy(P)));   // or swap if upside down
+        // if (N.y < 0.0) N = -N; // force upward-facing terrain
+        float3 N = i.normal;
+
+        // lighting
+        // sun
+        float ndl = saturate(dot(N, LIGHT_DIR));
+        float sun = ndl * ndl;
+        float up = saturate(N.y * 0.5 + 0.5);
+        float3 skyLight = lerp(float3(0.35,0.36,0.38), SKY_COLOR.rgb, up);
+        float down = saturate(-N.y * 0.5 + 0.5);
+        float3 bounce = float3(0.18,0.16,0.14) * down * 0.3;
+        float slope = 1.0 - saturate(N.y);
+        float slopeOcc = 1.0 - slope * 0.35;
+        float3 light = skyLight * 0.6 + bounce + sun * float3(1.0,0.96,0.9) * 1.2;
+
+        // highlight selected objects
+        if (PUSH_CONSTANTS.mode == MESH_MODE && i.object_id == selected_object_id) {
+            light *= 3.0;
+        }
+
+        o.color.rgb *= light * slopeOcc;
+    }
+
+    // fade to fog at distance to avoid cutoff, seems like it continues further
+    // todo: we want to have the actual sky there instead of the fog
+    float d = length(i.world_pos.xy);
+    float fog_t = smoothstep(10000.0f, 81920.0f / 2.0f, d);
+    // uint2 pix = (uint2)i.pos.xy;
+    // float t   = Bayer4x4(pix);
+    // clip((1.0 - fog_t) - t); // dither
+    o.color = lerp(o.color, SKY_COLOR, fog_t); // later just use same calculation for sky color by starting from pixel location
+    return o;
+}
