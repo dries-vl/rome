@@ -14,7 +14,7 @@ struct Machine
     VkQueue                   queue_present;
 };
 
-struct Machine create_machine(WINDOW window) {
+struct Machine create_machine() {
     // Create instance (with optional debug mode enabled)
     struct Machine machine = {0};
     VkApplicationInfo app_info = {
@@ -77,8 +77,8 @@ struct Machine create_machine(WINDOW window) {
 #else
     VkWaylandSurfaceCreateInfoKHR surface_info = {
         .sType  = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR,
-        .display    = pf_display_or_instance(window),
-        .surface = pf_surface_or_hwnd(window)
+        .display    = pf_display_or_instance(),
+        .surface = pf_surface_or_hwnd()
     };
     VK_CHECK(vkCreateWaylandSurfaceKHR(machine.instance, &surface_info, NULL, &machine.surface));
     pf_timestamp("Wayland surface created");
@@ -200,6 +200,5 @@ struct Machine create_machine(WINDOW window) {
     vkGetDeviceQueue(machine.device, machine.queue_family_graphics, 0, &machine.queue_graphics);
     vkGetDeviceQueue(machine.device, machine.queue_family_compute,  0, &machine.queue_compute);
     vkGetDeviceQueue(machine.device, machine.queue_family_present,  0, &machine.queue_present);
-    pf_timestamp("Logical device and queues created");
     return machine;
 }

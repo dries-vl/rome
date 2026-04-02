@@ -31,7 +31,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdint.h>
-#include "vendor/wayland-util.h"
+#include "wayland-util.h"
 
 #ifndef __has_attribute
 # define __has_attribute(x) 0  /* Compatibility with non-clang compilers. */

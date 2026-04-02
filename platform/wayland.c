@@ -1,15 +1,17 @@
 #ifdef __linux__
-#include "header.h"
+#include "platform.h"
+
+#include "vendor/wayland-client.h"
+#include "vendor/xdg-shell-client-protocol.h"
+#include "vendor/xdg-shell-client-protocol.c"
+#include "vendor/presentation-time-client-protocol.h"
+#include "vendor/presentation-time-client-protocol.c"
+#include "vendor/xkbcommon.h"
+
 #include <time.h>
 #include <sys/mman.h>
 #include <unistd.h>
-
-#include "platform/vendor/wayland-client.h"
-#include "platform/vendor/xdg-shell-client-protocol.h"
-#include "platform/vendor/xdg-shell-client-protocol.c"
-#include "platform/vendor/presentation-time-client-protocol.h"
-#include "platform/vendor/presentation-time-client-protocol.c"
-#include "platform/vendor/xkbcommon.h"
+#include <string.h>
 
 static clockid_t clockid;
 long long pf_ns_now(void){
@@ -20,10 +22,8 @@ long long T0;
 long long pf_ns_start(void){ return T0; }
 void pf_time_reset() {T0=pf_ns_now();}
 void pf_timestamp(char *msg) {
-    #if DEBUG_CPU == 1
-    unsigned long long _t=pf_ns_now(); 
+    unsigned long long _t=pf_ns_now();
     printf("[+%7.3f ms] %s\n",(_t-T0)/1e6,(msg));
-    #endif
 }
 
 static enum BUTTON map_keysym_to_button(xkb_keysym_t sym) {
@@ -354,7 +354,7 @@ void top_config(void* d, struct xdg_toplevel* t, int w, int h, struct wl_array* 
         if (!win->visible) pf_timestamp("Window is not visible"); else pf_timestamp("Window is visible");
     }
 }
-void top_close(void* d, struct xdg_toplevel* t){ }
+void top_close(void* d, struct xdg_toplevel* t){ _exit(0); }
 void top_bounds(void* d, struct xdg_toplevel* t, int w, int h){ }
 void top_caps(void* d, struct xdg_toplevel* t, struct wl_array* c){ }
 
@@ -489,71 +489,69 @@ static void request_frame_callback(struct wayland_window *w) {
     wl_callback_add_listener(cb, get_frame_cb_listener(), w);
 }
 
-int pf_window_width(void *w) {
-    struct wayland_window* win = w; return win->win_w;
+// APPLICATION CODE
+struct wayland_window w;
+
+int pf_window_width() {
+    return w.win_w;
 }
-int pf_window_height(void *w) {
-    struct wayland_window* win = w; return win->win_h;
+int pf_window_height() {
+    return w.win_h;
 }
-void *pf_surface_or_hwnd(void *w) {
-    struct wayland_window* win = w; return win->surface;
+void *pf_surface_or_hwnd() {
+    return w.surface;
 }
-void *pf_display_or_instance(void *w) {
-    struct wayland_window* win = w; return win->display;
+void *pf_display_or_instance() {
+    return w.display;
 }
-int pf_window_visible(void *w) {
-    struct wayland_window* win = w;
-    return win->visible;
+int pf_window_visible() {
+    return w.visible;
 }
 
-int pf_poll_events(void* win){
-    struct wayland_window* w = win;
-    if(!w) return 0;
-    wl_display_dispatch_pending(w->display); // dispatch all queued up events, don't block
-    wl_display_flush(w->display);
+int pf_poll_events(){
+    wl_display_dispatch_pending(w.display); // dispatch all queued up events, don't block
+    wl_display_flush(w.display);
     return 1;
 }
 
-void *pf_create_window(void *ud, KEYBOARD_CB key_cb, MOUSE_CB mouse_cb){
-    struct wayland_window* w = calloc(1, sizeof(*w));
-    w->win_w = 0; w->win_h = 0; w->fullscreen_configured = 0; w->frame_done = 1;
+void pf_create_window(char *app_name, void *ud, KEYBOARD_CB key_cb, MOUSE_CB mouse_cb){
+    w.win_w = 0; w.win_h = 0; w.fullscreen_configured = 0; w.frame_done = 1;
     // set the input callbacks
-    w->on_key = key_cb; w->on_mouse = mouse_cb; w->callback_data = ud;
+    w.on_key = key_cb; w.on_mouse = mouse_cb; w.callback_data = ud;
     // frame timing
-    w->refresh_ns = 16666667ull;
-    w->last_present_ns = 0;
-    w->last_feedback_ns = 0;
-    w->phase_ns = 0;
-    w->phase_alpha = 0.10;
-    w->xkb_ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
-    w->kbd_repeat_rate  = 0;
-    w->kbd_repeat_delay = 600; // compositor may override in kb_repeat_info
-    w->display = wl_display_connect(NULL);
+    w.refresh_ns = 16666667ull;
+    w.last_present_ns = 0;
+    w.last_feedback_ns = 0;
+    w.phase_ns = 0;
+    w.phase_alpha = 0.10;
+    w.xkb_ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+    w.kbd_repeat_rate  = 0;
+    w.kbd_repeat_delay = 600; // compositor may override in kb_repeat_info
+    w.display = wl_display_connect(NULL);
 
-    if (!w->display){ printf("wl connect failed\n"); _exit(1); }
+    if (!w.display){ printf("wl connect failed\n"); _exit(1); }
 
-    struct wl_registry* reg = wl_display_get_registry(w->display);
-    wl_registry_add_listener(reg, get_registry_listener(), w);
-    wl_display_roundtrip(w->display);
+    struct wl_registry* reg = wl_display_get_registry(w.display);
+    wl_registry_add_listener(reg, get_registry_listener(), &w);
+    wl_display_roundtrip(w.display);
     pf_time_reset(); // at this point the global clock used by presentation time is set, so we are synced right with it
     pf_timestamp("wl globals ready");
-    if (!w->compositor || !w->xdg_wm_base){ printf("missing compositor/xdg\n"); _exit(1); }
+    if (!w.compositor || !w.xdg_wm_base){ printf("missing compositor/xdg\n"); _exit(1); }
 
-    w->surface  = wl_compositor_create_surface(w->compositor);
-    wl_surface_add_listener(w->surface, get_surface_listener(), w);
-    w->xdg_surface = xdg_wm_base_get_xdg_surface(w->xdg_wm_base, w->surface);
-    xdg_surface_add_listener(w->xdg_surface, get_xsurf_listener(), w);
-    w->xdg_toplevel  = xdg_surface_get_toplevel(w->xdg_surface);
-    xdg_toplevel_add_listener(w->xdg_toplevel, get_top_listener(), w);
-    xdg_toplevel_set_title(w->xdg_toplevel, APP_NAME);
-    xdg_toplevel_set_app_id(w->xdg_toplevel, APP_NAME);
-    xdg_toplevel_set_fullscreen(w->xdg_toplevel, NULL);
-    wl_surface_commit(w->surface);
-    while (!w->fullscreen_configured) {
-        wl_display_flush(w->display);
-        wl_display_dispatch(w->display);
+    w.surface  = wl_compositor_create_surface(w.compositor);
+    wl_surface_add_listener(w.surface, get_surface_listener(), &w);
+    w.xdg_surface = xdg_wm_base_get_xdg_surface(w.xdg_wm_base, w.surface);
+    xdg_surface_add_listener(w.xdg_surface, get_xsurf_listener(), &w);
+    w.xdg_toplevel  = xdg_surface_get_toplevel(w.xdg_surface);
+    xdg_toplevel_add_listener(w.xdg_toplevel, get_top_listener(), &w);
+    xdg_toplevel_set_title(w.xdg_toplevel, app_name);
+    xdg_toplevel_set_app_id(w.xdg_toplevel, app_name);
+    xdg_toplevel_set_fullscreen(w.xdg_toplevel, NULL);
+    wl_surface_commit(w.surface);
+    while (!w.fullscreen_configured) {
+        wl_display_flush(w.display);
+        wl_display_dispatch(w.display);
     }
     pf_timestamp("set up wayland"); // should be done with all this in ~10ms or less
-    return w;
 }
 #endif

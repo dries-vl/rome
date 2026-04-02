@@ -1,5 +1,5 @@
 #ifdef _WIN32
-#include "header.h"
+#include "platform.h"
 
 #ifndef WINAPI
 #  if defined(_M_IX86) || defined(__i386__)

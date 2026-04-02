@@ -9,3 +9,5 @@ NUL
 *.npy
 *.tif
 vk_tools
+static/win32/*
+static/linux/*

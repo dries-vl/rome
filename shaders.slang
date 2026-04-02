@@ -1,24 +1,4 @@
-static const float PI                 = 3.1415926535f;                       // π constant for degree→radian conversions
-static const float fov_y_radians      = 60.0f * PI / 180.0f;                  // vertical field of view in radians (60°)
-static const float proj_scale_y       = 1.0f / tan(fov_y_radians * 0.5f);     // cot(FoV/2), projection scale factor for Y
-static const float aspect_ratio       = 16.0f / 9.0f;                         // screen aspect ratio (width / height)
-static const float proj_scale_x       = proj_scale_y / aspect_ratio;          // projection scale factor for X
-static const float near_plane         = 5.0f;                                 // near clipping plane distance
-static const float divide_by_127      = float(1.0/127.0);
-static const float divide_by_511      = float(1.0/511.0);
-static const float divide_by_32767    = float(1.0/32767.0);
-static const float tanHalfFovY        = tan(0.5 * fov_y_radians); // for frustrum culling
-static const float tanHalfFovX        = tanHalfFovY * aspect_ratio;
-
-struct object_metadata { uint meshes_offset, mesh_count; float radius;};
-[UnscopedEnum] enum object_type: int {TERRAIN, UNIT, BUILDING, VEGETATION};
-struct chunk { object_type object_type;};
-struct object { float2 pos; half2 vel; uint8_t cos, sin; uint8_t pad1,pad2;}; // ensure padding to 16b
-struct mdi {uint index_count, instance_count, first_index, base_vertex, first_instance;};
-struct di {uint group_count_x, group_count_y, group_count_z;};
-struct instance { uint object_id, animation;};
-struct unit { int16_t x, y, next_x, next_y;};
-struct bucket{uint ids[16];};
+#include "shaders.h"
 
 // functional data
 [[vk::binding(17,0)]] RWStructuredBuffer<unit> UNITS;    // size is # of chunks
@@ -43,17 +23,10 @@ struct bucket{uint ids[16];};
 // uniforms
 [[vk::binding(18,0)]]
 cbuffer uniforms {
-    float3 camera_position;
-    float  camera_pitch_sin, camera_pitch_cos;
-    float  camera_yaw_sin, camera_yaw_cos;
-    float  time, delta; // seconds
-    uint   selected_object_id;
-    float  drag_rect_start_x, drag_rect_start_y, drag_rect_end_x, drag_rect_end_y;
-    float  click_world_pos_x, click_world_pos_z, drag_world_pos_x, drag_world_pos_z;
+    uniforms u;
 };
 [[vk::binding(19, 0)]] Sampler2D TEXTURES[64];
 [[vk::binding(20, 0)]] Sampler2D DATA[2];
-[UnscopedEnum] enum mode: int {CHUNK_PASS, OBJECT_PASS, PREFIX_PASS, SCATTER_PASS, UI_MODE, FENCE_MODE, SEA_MODE, MESH_MODE, SKY_MODE};
 // push constants
 struct push_constants {
     mode mode;
@@ -112,8 +85,8 @@ float chunk_height_at_uv(float2 uv, bool fs) {
 }
 
 float3 get_camera_position() {
-    float2 uv = chunk_uv_at(camera_position.xz / 10); // camera is in dm -> convert to m
-    return camera_position + float3(0, chunk_height_at_uv(uv, false) / 10, 0); // chunk height is in cm -> convert to dm
+    float2 uv = chunk_uv_at(float2(u.camera_x, u.camera_z) / 10); // camera is in dm -> convert to m
+    return float3(u.camera_x, u.camera_y, u.camera_z) + float3(0, chunk_height_at_uv(uv, false) / 10, 0); // chunk height is in cm -> convert to dm
 }
 
 static const uint bucket_size = 2; // size in meters of each bucket ~2mx2m
@@ -144,6 +117,9 @@ int2 get_local_slot_in_chunk(int local_unit_index, int chunk_width) {
     return int2(x, y);
 }
 
+static const float tanHalfFovY        = tan(0.5 * fov_y_radians); // for frustrum culling
+static const float tanHalfFovX        = tanHalfFovY * aspect_ratio;
+
 groupshared uint counts[25];
 
 [shader("compute")] [numthreads(64,1,1)]
@@ -154,7 +130,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
     GroupMemoryBarrierWithGroupSync();
 
     switch (PUSH_CONSTANTS.mode) {
-    case CHUNK_PASS: {
+    case mode.CHUNK_PASS: {
         if (tid.x == 0) {
             INDIRECT_WORKGROUPS[0].group_count_x = 0;
             INDIRECT_WORKGROUPS[0].group_count_y = 0;
@@ -178,15 +154,15 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
                 delta_position = chunk_position - (get_camera_position() / 10); // in meters
             } else {
                 object object = OBJECTS[chunk_id * 64];    // 8 bytes
-                chunk_position = float3(object.pos.x * 10, 0, object.pos.y * 10);
+                chunk_position = float3(object.pos[0] * 10, 0, object.pos[1] * 10);
                 delta_position = chunk_position - get_camera_position();
             }
             // frustum
-            float position_yaw_z =  camera_yaw_sin * delta_position.x + camera_yaw_cos * delta_position.z; // apply yaw to Z
+            float position_yaw_z =  u.camera_yaw_sin * delta_position.x + u.camera_yaw_cos * delta_position.z; // apply yaw to Z
             float3 view = float3(
-                 camera_yaw_cos   * delta_position.x - camera_yaw_sin   * delta_position.z, // apply yaw to X
-                 camera_pitch_cos * delta_position.y + camera_pitch_sin * position_yaw_z, // apply pitch to Y (using new z)
-                -camera_pitch_sin * delta_position.y + camera_pitch_cos * position_yaw_z // apply pitch to Z (using new z)
+                 u.camera_yaw_cos   * delta_position.x - u.camera_yaw_sin   * delta_position.z, // apply yaw to X
+                 u.camera_pitch_cos * delta_position.y + u.camera_pitch_sin * position_yaw_z, // apply pitch to Y (using new z)
+                -u.camera_pitch_sin * delta_position.y + u.camera_pitch_cos * position_yaw_z // apply pitch to Z (using new z)
             );
             uint radius = 1524;
             bool valid = true;
@@ -235,8 +211,8 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             }
         }
     } break;
-    case OBJECT_PASS: 
-    case SCATTER_PASS: {
+    case mode.OBJECT_PASS: 
+    case mode.SCATTER_PASS: {
         // same fetches for whole workgroup
         uint stride, mesh_count, object_count;
         OBJECTS.GetDimensions(object_count, stride);
@@ -244,13 +220,13 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
 
         uint chunk_id;
         bool is_chunk_object = false;
-        if (PUSH_CONSTANTS.mode == SCATTER_PASS) {
+        if (PUSH_CONSTANTS.mode == mode.SCATTER_PASS) {
             is_chunk_object = gid.x < 100;
             chunk_id = is_chunk_object
                 ? tid.x
                 : VISIBLE_CHUNK_IDS[gid.x - 100];
         } else {
-            // OBJECT_PASS
+            // mode.OBJECT_PASS
             chunk_id = VISIBLE_CHUNK_IDS[gid.x];
         }
 
@@ -267,19 +243,19 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         if (is_chunk_object) {
             object_id = chunk_id * 64;
             chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
-            position = chunk_position - (camera_position / 10); // in meters
-        } else if (object_type == TERRAIN) {
+            position = chunk_position - (float3(u.camera_x, u.camera_y, u.camera_z) / 10); // in meters
+        } else if (object_type == object_type.TERRAIN) {
             chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
             float3 object_position = float3(int(id_within_chunk / 8) * 128 - 512 + 64, 0, int(id_within_chunk % 8) * 128 - 512 + 64);
             object_position += chunk_position;
-            position = object_position - (camera_position / 10); // in meters
-        } else if (object_type == UNIT) {
+            position = object_position - (float3(u.camera_x, u.camera_y, u.camera_z) / 10); // in meters
+        } else if (object_type == object_type.UNIT) {
             object object = OBJECTS[object_id]; // 8 bytes
             // MOVEMENT
             unit unit = UNITS[0];
-            float2 world_pos = object.pos;
+            float2 world_pos = float2(object.pos[0], object.pos[1]);
 
-            if (PUSH_CONSTANTS.mode == OBJECT_PASS) {
+            if (PUSH_CONSTANTS.mode == mode.OBJECT_PASS) {
                 uint bucket_id = get_bucket_id(world_pos.x + 2048, world_pos.y + 2048);
                 uint slot;
                 InterlockedAdd(BUCKETS[bucket_id].ids[0], 1, slot);
@@ -287,7 +263,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
                 if (slot <= 15) BUCKETS[bucket_id].ids[slot] = object_id;
             }
 
-            if (PUSH_CONSTANTS.mode == SCATTER_PASS) {
+            if (PUSH_CONSTANTS.mode == mode.SCATTER_PASS) {
                 static const float move_speed = 5.0;
                 static const float body_radius = 0.6;
                 static const float block_radius = body_radius * 1.0;
@@ -299,11 +275,11 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
                 static const float spacing = 1.0;
                 static const int chunk_count = 10;
                 static const int chunk_capacity = 64;
-                float2 world_pos = OBJECTS[object_id].pos;
+                float2 world_pos = float2(OBJECTS[object_id].pos[0], OBJECTS[object_id].pos[1]);
                 float2 velocity  = OBJECTS[object_id].vel;
-                float2 formation_origin = float2(drag_world_pos_x, drag_world_pos_z);
+                float2 formation_origin = float2(u.drag_world_pos_x, u.drag_world_pos_z);
                 // Intended width of the entire formation in cells.
-                int total_formation_width = (int)ceil(distance(float2(click_world_pos_x, click_world_pos_z), float2(drag_world_pos_x, drag_world_pos_z)));
+                int total_formation_width = (int)ceil(distance(float2(u.click_world_pos_x, u.click_world_pos_z), float2(u.drag_world_pos_x, u.drag_world_pos_z)));
                 // For now this is fixed. Later fill from real chunk state.
                 int men_per_chunk[chunk_count] = { 64,64,64,64,64,64,64,64,64,64 };
                 // You need these two values per unit.
@@ -354,7 +330,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
                         for (uint i = 1; i <= count; ++i) {
                             uint other_id = BUCKETS[bucket_id].ids[i];
                             if (other_id == object_id) continue;
-                            float2 other_pos = OBJECTS[other_id].pos;
+                            float2 other_pos = float2(OBJECTS[other_id].pos[0], OBJECTS[other_id].pos[1]);
                             float2 offset = world_pos - other_pos;
                             float dist = length(offset);
                             if (dist < epsilon || dist > avoid_radius) continue;
@@ -378,26 +354,27 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
                 if (target_speed > move_speed) {
                     target_velocity = target_velocity / target_speed * move_speed;
                 }
-                float blend = min(1.0, responsiveness * delta);
+                float blend = min(1.0, responsiveness * u.delta);
                 velocity += (target_velocity - velocity) * blend;
                 float speed = length(velocity);
                 if (speed > move_speed) {
                     velocity = velocity / speed * move_speed;
                 }
-                world_pos += velocity * delta;
+                world_pos += velocity * u.delta;
                 OBJECTS[object_id].vel = (half2)velocity;
-                OBJECTS[object_id].pos = world_pos;
+                OBJECTS[object_id].pos[0] = world_pos.x;
+                OBJECTS[object_id].pos[1] = world_pos.y;
             }
             float px_size = 1.0 / 641.0;
             float2 uv = chunk_uv_at(world_pos) + (px_size / 2);
             float height = chunk_height_at_uv(uv, false) / 10;
-            position = float3(object.pos.x * 10, height, object.pos.y * 10) - get_camera_position();
+            position = float3(object.pos[0] * 10, height, object.pos[1] * 10) - get_camera_position();
         }
-        float position_yaw_z = camera_yaw_sin * position.x + camera_yaw_cos * position.z; // apply yaw to Z
+        float position_yaw_z = u.camera_yaw_sin * position.x + u.camera_yaw_cos * position.z; // apply yaw to Z
         float3 view = float3(
-             camera_yaw_cos   * position.x - camera_yaw_sin   * position.z, // apply yaw to X
-             camera_pitch_cos * position.y + camera_pitch_sin * position_yaw_z, // apply pitch to Y (using new z)
-            -camera_pitch_sin * position.y + camera_pitch_cos * position_yaw_z // apply pitch to Z (using new z)
+             u.camera_yaw_cos   * position.x - u.camera_yaw_sin   * position.z, // apply yaw to X
+             u.camera_pitch_cos * position.y + u.camera_pitch_sin * position_yaw_z, // apply pitch to Y (using new z)
+            -u.camera_pitch_sin * position.y + u.camera_pitch_cos * position_yaw_z // apply pitch to Z (using new z)
         );
 
         // pick lod level
@@ -407,7 +384,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         float radius = OBJECT_METADATA[object_type].radius;
         if (is_chunk_object) radius = radius * 20;
         uint lod_level = choose_lod_step(distance, radius);
-        if (object_type == TERRAIN) lod_level = 1;
+        if (object_type == object_type.TERRAIN) lod_level = 1;
         if (is_chunk_object) lod_level = 2;
         // if (object_type == UNIT) lod_level = 0;
         bool outside_frustrum = (abs(view.x) - radius) > (view.z * tanHalfFovX) || (abs(view.y) - radius) > (view.z * tanHalfFovY);
@@ -415,7 +392,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         // if (outside_frustrum) valid = false;
         if (is_chunk_object && !(chunk_position.x < -2048 || chunk_position.x >= 2048 || chunk_position.z < -2048 || chunk_position.z >= 2048)) valid = false;
 
-        if (PUSH_CONSTANTS.mode == OBJECT_PASS) {
+        if (PUSH_CONSTANTS.mode == mode.OBJECT_PASS) {
             // append to count of the lod level of this object
             if (valid) {
                 uint slot; InterlockedAdd(counts[lod_level], 1, slot);
@@ -447,7 +424,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
                     }
                 }
             }
-        } else if (PUSH_CONSTANTS.mode == SCATTER_PASS) {
+        } else if (PUSH_CONSTANTS.mode == mode.SCATTER_PASS) {
             // append to the contiguous instance list
             if (valid) {
                 uint mesh_id = base_mesh_id + lod_level;
@@ -456,7 +433,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
                 const uint dst = OFFSET_PER_MESH[mesh_id] + slot;
                 if (is_chunk_object) {
                     RENDERED_INSTANCES[dst] = instance(chunk_id + 1000000, 0);
-                } else if (object_type == TERRAIN) {
+                } else if (object_type == object_type.TERRAIN) {
                     RENDERED_INSTANCES[dst] = instance(object_id, 0);
                 } else {
                     // ANIMATION
@@ -466,7 +443,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
                     uint animation = 0;
                     uint next_animation = 1;
                     float phase = frac(object_id * 0.756688471) * ANIMATION_DURATION; // randomized start time for animations, somewhere within the 2s
-                    float t_clip = time + phase; // progress with time
+                    float t_clip = u.time + phase; // progress with time
                     float t_in_clip = frac(t_clip / PAIR_DURATION) * PAIR_DURATION; // 0 to 4s
                     float frame_f = t_in_clip / FRAME_DURATION; // 0..8 (two clips is eight total frames)
                     uint frame0 = (uint)frame_f; // 0..7
@@ -488,7 +465,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             }
         }
     } break;
-    case PREFIX_PASS: {
+    case mode.PREFIX_PASS: {
         if (tid.x != 0) return; // run on a single thread; tiny work
         uint mesh_count, stride; 
         MESH_INFO.GetDimensions(mesh_count, stride);
@@ -606,7 +583,7 @@ struct vs_out {
 [shader("vertex")]
 vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTANCE, uint DRAW_ID : SV_DrawIndex) {
     // SKY path: fullscreen triangle
-    if (PUSH_CONSTANTS.mode == SKY_MODE || PUSH_CONSTANTS.mode == UI_MODE) { // sky and ui both
+    if (PUSH_CONSTANTS.mode == mode.SKY_MODE || PUSH_CONSTANTS.mode == mode.UI_MODE) { // sky and ui both
         vs_out o;
         float2 p;
         if (VERTEX_ID == 1) p = float2(-1.0,  3.0); // was (-1,-1)
@@ -617,35 +594,37 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
         o.object_id = 0;
         float2 ndc = p * 0.5f + 0.5f;
         o.uv = float2(ndc.x, 1.0 - ndc.y);
-        if (PUSH_CONSTANTS.mode == UI_MODE) o.pos.z = 1.0; // ui on top of everything
+        if (PUSH_CONSTANTS.mode == mode.UI_MODE) o.pos.z = 1.0; // ui on top of everything
         o.world_pos = 0;
         return o;
     } 
     
-    if (PUSH_CONSTANTS.mode == FENCE_MODE || PUSH_CONSTANTS.mode == SEA_MODE) { // fence and sea
+    if (PUSH_CONSTANTS.mode == mode.FENCE_MODE || PUSH_CONSTANTS.mode == mode.SEA_MODE) { // fence and sea
         float3 p;
-        if (PUSH_CONSTANTS.mode == FENCE_MODE)
+        if (PUSH_CONSTANTS.mode == mode.FENCE_MODE)
             p = FENCE_V[FENCE_I[VERTEX_ID]];
         else {
             p = SEA_V[SEA_I[VERTEX_ID]];
-            p.y += 5.0 * sin(time);
+            p.y += 5.0 * sin(u.time);
         }
         float3 d = p - (get_camera_position() / 10.0);
         // yaw + pitch
-        float zYaw = camera_yaw_sin * d.x + camera_yaw_cos * d.z;
+        float zYaw = u.camera_yaw_sin * d.x + u.camera_yaw_cos * d.z;
         float3 vM = float3(
-            camera_yaw_cos   * d.x - camera_yaw_sin   * d.z,
-            camera_pitch_cos * d.y + camera_pitch_sin * zYaw,
-           -camera_pitch_sin * d.y + camera_pitch_cos * zYaw
+            u.camera_yaw_cos   * d.x - u.camera_yaw_sin   * d.z,
+            u.camera_pitch_cos * d.y + u.camera_pitch_sin * zYaw,
+           -u.camera_pitch_sin * d.y + u.camera_pitch_cos * zYaw
         );
         // meters -> cm for projection
         float vx = vM.x * 100.0;
         float vy = vM.y * 100.0;
         float vz = vM.z * 100.0;
+        static const float proj_scale_y = 1.0f / tan(fov_y_radians * 0.5f); // cot(FoV/2), projection scale factor for Y
+        static const float proj_scale_x = proj_scale_y / aspect_ratio; // projection scale factor for X
         vs_out o;
         o.pos = float4(proj_scale_x * vx, proj_scale_y * vy, near_plane, vz);
         o.uv = 0;
-        if (PUSH_CONSTANTS.mode == SEA_MODE) {
+        if (PUSH_CONSTANTS.mode == mode.SEA_MODE) {
             o.uv = (p.xz + SEA_S) * (1.0f / (2.0f * SEA_S));
             o.uv.y = 1.0f - o.uv.y;
         }
@@ -724,8 +703,8 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
         int rank = object_id % 64;
         float2 formation = float2(rank % 8, rank / 8) * 10.0f;
         // float3 object_position = float3(formation.x, 0, formation.y);
-        float3 object_position = float3(object.pos.x, 0, object.pos.y);
-        world_pos = object.pos;
+        float3 object_position = float3(object.pos[0], 0, object.pos[1]);
+        world_pos = float2(object.pos[0], object.pos[1]);
         position = (object_position * 10.0) - get_camera_position();
         float object_yaw_cos = float(object.cos) * divide_by_127;
         float object_yaw_sin = float(object.sin) * divide_by_127;
@@ -774,36 +753,34 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
     }
 
     // rotate position around y for the combined camera-instance yaw
-    float cos_d = object_yaw_cos * camera_yaw_cos + object_yaw_sin * camera_yaw_sin; // cos(a-b)
-    float sin_d = object_yaw_sin * camera_yaw_cos - object_yaw_cos * camera_yaw_sin; // sin(a-b)
+    float cos_d = object_yaw_cos * u.camera_yaw_cos + object_yaw_sin * u.camera_yaw_sin; // cos(a-b)
+    float sin_d = object_yaw_sin * u.camera_yaw_cos - object_yaw_cos * u.camera_yaw_sin; // sin(a-b)
     float x1 =  cos_d * vertex.x + sin_d * vertex.z;
     float z1 = -sin_d * vertex.x + cos_d * vertex.z;
     float y1 =  vertex.y;
 
     // rotate position around x for the camera pitch
-    float y2 =  camera_pitch_cos * y1 + camera_pitch_sin * z1;
-    float z2 = -camera_pitch_sin * y1 + camera_pitch_cos * z1;
+    float y2 =  u.camera_pitch_cos * y1 + u.camera_pitch_sin * z1;
+    float z2 = -u.camera_pitch_sin * y1 + u.camera_pitch_cos * z1;
     float x2 =  x1;
 
     // move position into the calculated instance-in-camera-space
-    float position_yaw_z =  camera_yaw_sin * position.x + camera_yaw_cos * position.z; // apply yaw to Z
+    float position_yaw_z =  u.camera_yaw_sin * position.x + u.camera_yaw_cos * position.z; // apply yaw to Z
     float3 view = float3(
-         camera_yaw_cos   * position.x - camera_yaw_sin   * position.z, // apply yaw to X
-         camera_pitch_cos * position.y + camera_pitch_sin * position_yaw_z, // apply pitch to Y (using new z)
-        -camera_pitch_sin * position.y + camera_pitch_cos * position_yaw_z // apply pitch to Z (using new z)
+         u.camera_yaw_cos   * position.x - u.camera_yaw_sin   * position.z, // apply yaw to X
+         u.camera_pitch_cos * position.y + u.camera_pitch_sin * position_yaw_z, // apply pitch to Y (using new z)
+        -u.camera_pitch_sin * position.y + u.camera_pitch_cos * position_yaw_z // apply pitch to Z (using new z)
     );
     float vx = x2 + (10.0 * view.x); // times ten to go from m to cm
     float vy = y2 + (10.0 * view.y);
     float vz = z2 + (10.0 * view.z);
 
     // perspective projection (reverse dept)
-    float cx = proj_scale_x * vx;
-    float cy = proj_scale_y * vy;
-    float cz = near_plane;
-    float w = vz;
+    static const float proj_scale_y = 1.0f / tan(fov_y_radians * 0.5f); // cot(FoV/2), projection scale factor for Y
+    static const float proj_scale_x = proj_scale_y / aspect_ratio; // projection scale factor for X
 
     vs_out o = vs_out(float4(-1));
-    o.pos = float4(cx, cy, cz, w);
+    o.pos = float4(proj_scale_x * vx, proj_scale_y * vy, near_plane, vz);
     o.normal = normal;
     o.uv = uv;
     o.is_chunk = is_chunk;
@@ -876,32 +853,31 @@ static const float4 SEA_COLOR = float4(0.0, 0.2, 0.7, 1.0);
 ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
     ps_out o;
     o.id = i.object_id;
-    if (PUSH_CONSTANTS.mode == SKY_MODE) o.color = SKY_COLOR;
-    else if (PUSH_CONSTANTS.mode == UI_MODE) {
+    if (PUSH_CONSTANTS.mode == mode.SKY_MODE) o.color = SKY_COLOR;
+    else if (PUSH_CONSTANTS.mode == mode.UI_MODE) {
         bool inside =
-            i.uv.x >= drag_rect_start_x &&
-            i.uv.x <= drag_rect_end_x &&
-            i.uv.y >= drag_rect_start_y &&
-            i.uv.y <= drag_rect_end_y;
+            i.uv.x >= u.drag_rect_start_x &&
+            i.uv.x <= u.drag_rect_end_x &&
+            i.uv.y >= u.drag_rect_start_y &&
+            i.uv.y <= u.drag_rect_end_y;
         if (!inside) discard;
         float px      = 1.0 / 1920.0; // or pass real width/height in
         float py      = 1.0 / 1080.0;
         float thick_x = 2.0 * px;
         float thick_y = 2.0 * py;
         bool on_border =
-            i.uv.x < drag_rect_start_x + thick_x ||
-            i.uv.x > drag_rect_end_x - thick_x ||
-            i.uv.y < drag_rect_start_y + thick_y ||
-            i.uv.y > drag_rect_end_y - thick_y;
-        // if (!on_border) discard;
+            i.uv.x < u.drag_rect_start_x + thick_x ||
+            i.uv.x > u.drag_rect_end_x - thick_x ||
+            i.uv.y < u.drag_rect_start_y + thick_y ||
+            i.uv.y > u.drag_rect_end_y - thick_y;
+        if (!on_border) discard;
 
         float4 border_color = float4(0.2, 0.8, 1.0, 0.8); // strong
-        border_color = TEXTURES[0].Sample(i.uv);
 
         o.color = border_color; }
-    else if (PUSH_CONSTANTS.mode == FENCE_MODE) o.color = float4(0.0, 0.0, 0.0, 1.0);
-    else if (PUSH_CONSTANTS.mode == SEA_MODE) o.color = SEA_COLOR;
-    else if (PUSH_CONSTANTS.mode == MESH_MODE) {
+    else if (PUSH_CONSTANTS.mode == mode.FENCE_MODE) o.color = float4(0.0, 0.0, 0.0, 1.0);
+    else if (PUSH_CONSTANTS.mode == mode.SEA_MODE) o.color = SEA_COLOR;
+    else if (PUSH_CONSTANTS.mode == mode.MESH_MODE) {
         // debug draw triangles as distinct colors
         // float3 color = frac(sin((primID+43) * 43.5453) * float3(23.1407, 85.928, 43.533));
         // if(color.x+color.y+color.z < 0.1) color = float3(float(primID % 32) / 32, float((primID + 38) % 64) / 64, float((primID + 17) % 32) / 32);
@@ -909,10 +885,13 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         // float g = frac(sin(primID * 12.9898) * 43758.5453);
         // float g = frac(sin(bucket_id * 12.9898) * 43758.5453);
         // float3 color = g.xxx;
-        // float3 color = frac(sin((i.object_id+43) * 43.5453) * float3(23.1407, 85.928, 43.533));
-        // if(color.x+color.y+color.z < 0.1) color = float3(float(i.object_id % 32) / 32, float((i.object_id + 38) % 64) / 64, float((i.object_id + 17) % 32) / 32);
-        // return float4(color, 1.0);
-        
+
+        // draw the object as color
+        // float3 color = frac(sin((i.object_id+43) * 0.5453) * float3(23.1407, 85.928, 43.533));
+        // if (color.x + color.y + color.z < 0.1) color = float3(float(i.object_id % 32) / 32, float((i.object_id + 38) % 64) / 64, float((i.object_id + 17) % 32) / 32);
+        // o.color = float4(color, 1);
+        // return o;
+
         // float4 map = TEXTURES[1].Sample(i.uv);
         float2 puv = round(i.uv * 640) / 640; // which quad are we on (not vertex)
         float px_size = 1.0f / 640.0f;        // offset by
@@ -965,9 +944,9 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         if (distance_from_origin < 1.0) o.color.g = 1.0;
 
         // CLICK POSITION
-        if (drag_world_pos_x != 0 && drag_world_pos_z != 0 && (drag_world_pos_x != click_world_pos_x || drag_world_pos_z != click_world_pos_z)) {
-            float2 p1 = float2(click_world_pos_x, click_world_pos_z);
-            float2 p2 = float2(drag_world_pos_x,  drag_world_pos_z);
+        if (u.drag_world_pos_x != 0 && u.drag_world_pos_z != 0 && (u.drag_world_pos_x != u.click_world_pos_x || u.drag_world_pos_z != u.click_world_pos_z)) {
+            float2 p1 = float2(u.click_world_pos_x, u.click_world_pos_z);
+            float2 p2 = float2(u.drag_world_pos_x,  u.drag_world_pos_z);
             float2 q  = i.world_pos;   // if i.world_pos is float3, use i.world_pos.xz
             // top edge basis
             float2 d = p2 - p1;
@@ -1051,7 +1030,7 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
     float2 fs_uv = ((i.uv + (px_size / 2)) * 640.0) / 641.0;
 
     // PASSABLE GRID
-    if (PUSH_CONSTANTS.mode == MESH_MODE) {
+    if (PUSH_CONSTANTS.mode == mode.MESH_MODE) {
         // float2 snapped_world_pos = i.world_pos - (i.world_pos % float2(4.0));
         // float h00 = chunk_height_at_uv(chunk_uv_at(snapped_world_pos) + (px_size / 2), true);
         // float h10 = chunk_height_at_uv(chunk_uv_at(snapped_world_pos + float2(4, 0)) + (px_size / 2), true);
@@ -1069,7 +1048,7 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         // if (steepness < 80.0) o.color.g = 1;
     }
 
-    if (PUSH_CONSTANTS.mode == SEA_MODE) {
+    if (PUSH_CONSTANTS.mode == mode.SEA_MODE) {
         float terrainH = chunk_height_at_uv(i.uv + (px_size / 2), true) / 100.0f;
         float depth = max(0.0f, SEA_LEVEL - terrainH);
         float shallowW = 1.0f - smoothstep(0.0f, 40.0f, depth);
@@ -1082,7 +1061,7 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         o.color.rgb = waterColor;
     }
 
-    if (PUSH_CONSTANTS.mode == MESH_MODE) {
+    if (PUSH_CONSTANTS.mode == mode.MESH_MODE) {
         // NORMAL SMOOTH
         // float px = 1.0f / (641.0f); // offset by
         // float hTL = chunk_height_at_uv_fs(fs_uv + float2(-px,  px));
@@ -1183,7 +1162,7 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         float3 light = skyLight * 0.6 + bounce + sun * float3(1.0,0.96,0.9) * 1.2;
 
         // highlight selected objects
-        if (PUSH_CONSTANTS.mode == MESH_MODE && i.object_id == selected_object_id) {
+        if (PUSH_CONSTANTS.mode == mode.MESH_MODE && i.object_id == u.selected_object_id) {
             light *= 3.0;
         }
 

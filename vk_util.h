@@ -42,8 +42,8 @@ static uint32_t find_memory_type_index(VkPhysicalDevice physical_device,uint32_t
 
 #if DEBUG_VULKAN == 1
 VKAPI_ATTR VkBool32 VKAPI_CALL vk_debug_cb(VkDebugUtilsMessageSeverityFlagBitsEXT severity, VkDebugUtilsMessageTypeFlagsEXT messageTypes, const VkDebugUtilsMessengerCallbackDataEXT* data, void* pUserData) {
-    u32 error = severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
-    u32 warning = severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT;
+    unsigned int error = severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+    unsigned int warning = severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT;
     if (error || warning) {
         const char* sev =
             (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) ? "ERROR" :
@@ -160,3 +160,100 @@ static inline void cmd_barrier2(
     dep.pImageMemoryBarriers     = img;
     vkCmdPipelineBarrier2(cmd, &dep);
 }
+
+#pragma region HELPER
+void create_buffer_and_memory(VkDevice device, VkPhysicalDevice phys,
+                              VkDeviceSize size, VkBufferUsageFlags usage,
+                              VkMemoryPropertyFlags props,
+                              VkBuffer* out_buf, VkDeviceMemory* out_mem) {
+    VkBufferCreateInfo buf_info = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size  = size,
+        .usage = usage,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+    };
+    VK_CHECK(vkCreateBuffer(device, &buf_info, NULL, out_buf));
+
+    VkMemoryRequirements mem_reqs;
+    vkGetBufferMemoryRequirements(device, *out_buf, &mem_reqs);
+
+    VkMemoryAllocateInfo alloc_info = {
+        .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize  = mem_reqs.size,  // <-- use driver-required size
+        .memoryTypeIndex = find_memory_type_index(phys, mem_reqs.memoryTypeBits, props)
+    };
+    VK_CHECK(vkAllocateMemory(device, &alloc_info, NULL, out_mem));
+    VK_CHECK(vkBindBufferMemory(device, *out_buf, *out_mem, 0));
+}
+static void upload_to_buffer(VkDevice dev, VkDeviceMemory mem, size_t offset, const void *src, size_t bytes) {
+    void* dst = NULL;
+    VK_CHECK(vkMapMemory(dev, mem, offset, bytes, 0, &dst));
+    memcpy(dst, src, bytes);
+    vkUnmapMemory(dev, mem);
+}
+
+// --- Single-use command helpers (record/submit/wait) ---
+VkCommandBuffer begin_single_use_cmd(VkDevice device, VkCommandPool pool) {
+    VkCommandBufferAllocateInfo ai = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = pool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1
+    };
+    VkCommandBuffer cmd;
+    VK_CHECK(vkAllocateCommandBuffers(device, &ai, &cmd));
+    VK_CHECK(vkBeginCommandBuffer(cmd, &(VkCommandBufferBeginInfo){
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
+    }));
+    return cmd;
+}
+void end_single_use_cmd(VkDevice device, VkQueue queue, VkCommandPool pool, VkCommandBuffer cmd) {
+    VK_CHECK(vkEndCommandBuffer(cmd));
+    VK_CHECK(vkQueueSubmit(queue, 1, &(VkSubmitInfo){
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1, .pCommandBuffers = &cmd
+    }, VK_NULL_HANDLE));
+    VK_CHECK(vkQueueWaitIdle(queue));
+    vkFreeCommandBuffers(device, pool, 1, &cmd);
+}
+
+// Create a DEVICE_LOCAL buffer and upload data via a temporary HOST_VISIBLE staging buffer.
+static void create_and_upload_device_local_buffer(
+    VkDevice device, VkPhysicalDevice phys, VkQueue queue, VkCommandPool pool,
+    VkDeviceSize size, VkBufferUsageFlags usage,
+    const void* src, VkBuffer* out_buf, VkDeviceMemory* out_mem,
+    VkDeviceSize dst_offset /*usually 0*/
+){
+    // 1) Create destination (DEVICE_LOCAL)
+    create_buffer_and_memory(device, phys, size, usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, out_buf, out_mem);
+
+    if (size == 0 || src == NULL) return; // nothing to upload
+
+    // 2) Create staging (HOST_VISIBLE|COHERENT, TRANSFER_SRC)
+    VkBuffer staging; VkDeviceMemory staging_mem;
+    create_buffer_and_memory(device, phys, size,
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        &staging, &staging_mem);
+
+    // 3) Map+copy to staging
+    upload_to_buffer(device, staging_mem, 0, src, (size_t)size);
+
+    // 4) Record copy
+    VkCommandBuffer cmd = begin_single_use_cmd(device, pool);
+    VkBufferCopy copy = { .srcOffset = 0, .dstOffset = dst_offset, .size = size };
+    vkCmdCopyBuffer(cmd, staging, *out_buf, 1, &copy);
+    end_single_use_cmd(device, queue, pool, cmd);
+
+    // 5) Destroy staging
+    vkDestroyBuffer(device, staging, NULL);
+    vkFreeMemory(device, staging_mem, NULL);
+}
+static int compare_int(const void* a, const void* b) {
+    if (*(const int*)a < *(const int*)b) return -1;
+    if (*(const int*)a > *(const int*)b) return  1;
+    return 0;
+}
+#pragma endregion

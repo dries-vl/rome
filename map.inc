@@ -1,12 +1,5 @@
 #pragma once
 
-// todo: get rid of these imports
-#include <stdint.h>
-#include <stddef.h>
-#include <stdio.h>
-#include <string.h>
-#include <math.h>
-
 #ifndef DETAIL_SRC_W
 #define DETAIL_SRC_W 1489
 #endif
@@ -33,37 +26,14 @@
 
 extern const unsigned char height_data[];
 extern const unsigned char height_data_end[];
-#define height_data_len ((size_t)(height_data_end - height_data))
+#define height_data_len ((__SIZE_TYPE__)(height_data_end - height_data))
 
 extern const unsigned char terrain_data[];
 extern const unsigned char terrain_data_end[];
-#define terrain_data_len ((size_t)(terrain_data_end - terrain_data))
+#define terrain_data_len ((__SIZE_TYPE__)(terrain_data_end - terrain_data))
 
-/*
-Required addition in texture.h:
-
-static int upload_detail_texture_pair(
-    struct Machine* machine,
-    struct Swapchain* swapchain,
-    const uint8_t* terrain_pixels,
-    const uint8_t* height_pixels,
-    uint32_t w,
-    uint32_t h
-);
-
-This header calls that function.
-*/
-static int upload_detail_texture_pair(
-    struct Machine* machine,
-    struct Swapchain* swapchain,
-    const uint8_t* terrain_pixels,
-    const uint8_t* height_pixels,
-    uint32_t w,
-    uint32_t h
-);
-
-static uint8_t g_detail_terrain[DETAIL_UPSCALED_W * DETAIL_UPSCALED_H];
-static uint8_t g_detail_height[DETAIL_UPSCALED_W * DETAIL_UPSCALED_H];
+char g_detail_terrain[DETAIL_UPSCALED_W * DETAIL_UPSCALED_H];
+char g_detail_height[DETAIL_UPSCALED_W * DETAIL_UPSCALED_H];
 
 static int detail_clampi(int v, int lo, int hi) {
     if (v < lo) return lo;
@@ -77,8 +47,8 @@ static float detail_clampf(float v, float lo, float hi) {
     return v;
 }
 
-static uint8_t detail_sample_bilinear_u8(
-    const uint8_t* src,
+static char detail_sample_bilinear_u8(
+    const char* src,
     int src_w,
     int src_h,
     float x,
@@ -110,7 +80,7 @@ static uint8_t detail_sample_bilinear_u8(
     int iv = (int)(v + 0.5f);
     if (iv < 0) iv = 0;
     if (iv > 255) iv = 255;
-    return (uint8_t)iv;
+    return (char)iv;
 }
 
 /*
@@ -127,14 +97,14 @@ So the covered source texels are:
 That region is then resampled to 641x641.
 */
 static void detail_resample_region_u8(
-    const uint8_t* src,
+    const char* src,
     int src_w,
     int src_h,
     int center_x,
     int center_y,
     int region_w,
     int region_h,
-    uint8_t* dst,
+    char* dst,
     int dst_w,
     int dst_h
 ) {
@@ -170,9 +140,7 @@ static void detail_resample_region_u8(
     }
 }
 
-static int update_detail_region_and_upload(
-    struct Machine* machine,
-    struct Swapchain* swapchain,
+static void create_detail_region(
     int center_x,
     int center_y
 ) {
@@ -181,16 +149,14 @@ static int update_detail_region_and_upload(
         printf("height_data is KTX2, expected raw grayscale bytes\n");
         _exit(0);
     }
-    if (height_data_len < (size_t)(DETAIL_SRC_W * DETAIL_SRC_H)) {
+    if (height_data_len < (__SIZE_TYPE__)(DETAIL_SRC_W * DETAIL_SRC_H)) {
         printf("height_data is smaller than expected (%zu < %d)\n",
             height_data_len, DETAIL_SRC_W * DETAIL_SRC_H);
-        return 0;
     }
 
-    if (terrain_data_len < (size_t)(DETAIL_SRC_W * DETAIL_SRC_H)) {
+    if (terrain_data_len < (__SIZE_TYPE__)(DETAIL_SRC_W * DETAIL_SRC_H)) {
         printf("terrain_data is smaller than expected (%zu < %d)\n",
             terrain_data_len, DETAIL_SRC_W * DETAIL_SRC_H);
-        return 0;
     }
 
     detail_resample_region_u8(
@@ -219,12 +185,4 @@ static int update_detail_region_and_upload(
         DETAIL_UPSCALED_H
     );
 
-    return upload_detail_texture_pair(
-        machine,
-        swapchain,
-        g_detail_terrain,
-        g_detail_height,
-        DETAIL_UPSCALED_W,
-        DETAIL_UPSCALED_H
-    );
 }

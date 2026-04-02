@@ -40,7 +40,7 @@ struct Swapchain {
     #endif
 };
 
-struct Swapchain create_swapchain(const struct Machine *machine, WINDOW w) {
+struct Swapchain create_swapchain(const struct Machine *machine) {
     struct Swapchain swapchain = {0};
 
     // Surface capabilities and formats
@@ -66,8 +66,8 @@ struct Swapchain create_swapchain(const struct Machine *machine, WINDOW w) {
 
     VkExtent2D desired_extent = capabilities.currentExtent;
     if (desired_extent.width == UINT32_MAX) {
-        desired_extent.width  = pf_window_width(w);
-        desired_extent.height = pf_window_height(w);
+        desired_extent.width  = pf_window_width();
+        desired_extent.height = pf_window_height();
     }
     swapchain.swapchain_extent = desired_extent;
 
@@ -269,7 +269,6 @@ struct Swapchain create_swapchain(const struct Machine *machine, WINDOW w) {
     };
     VK_CHECK(vkCreateImageView(machine->device, &view, NULL, &swapchain.pick_image_view));
 
-    pf_timestamp("Swapchain created");
     return swapchain;
 }
 
@@ -318,9 +317,9 @@ void destroy_swapchain(struct Machine* machine, struct Renderer* renderer, struc
     swapchain->swapchain_image_count = 0;
 }
 
-static void recreate_swapchain(struct Machine* machine, struct Renderer* renderer,struct Swapchain* swapchain,WINDOW window) {
+static void recreate_swapchain(struct Machine* machine, struct Renderer* renderer,struct Swapchain* swapchain) {
     // Wait for GPU to finish anything that might use old swapchain resources
     vkDeviceWaitIdle(machine->device);
     destroy_swapchain(machine, renderer, swapchain);
-    *swapchain = create_swapchain(machine, window);
+    *swapchain = create_swapchain(machine);
 }

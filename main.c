@@ -1,24 +1,120 @@
 #include "header.h"
+#include "platform/platform.h"
 
+#include "mesh.inc"
+#include "map.inc"
+
+extern const unsigned char shaders[];
+extern const unsigned char shaders_end[];
+#define shaders_len ((size_t)(shaders_end - shaders))
+
+// todo: avoid globals
+int g_want_pick = 0;
+int g_mouse_x = 0, g_mouse_y = 0;
+int selected_object_id = 0;
+int buttons[BUTTON_COUNT];
+int g_drag_active = 0;
+int g_drag_start_x = 0, g_drag_start_y = 0;
+int g_drag_end_x   = 0, g_drag_end_y   = 0;
+float cam_x = 0, cam_y = 2, cam_z = -5, cam_yaw = 0, cam_pitch = 0;
+void move_forward(int amount) {
+    double rad = (double)(cam_yaw) * 3.14159265f / 32767.0f;
+    short x_amount = (short)lround(sin(rad) * amount);
+    short z_amount = (short)lround(cos(rad) * amount);
+    cam_x += x_amount;
+    cam_z += z_amount;
+}
+void move_sideways(int amount) {
+    double rad = (double)(cam_yaw) * 3.14159265f / 32767.0f;
+    short x_amount = (short)lround(cos(rad) * amount);
+    short z_amount = (short)lround(sin(rad) * amount);
+    cam_x += x_amount;
+    cam_z -= z_amount;
+}
+int scaled(int value) {
+    static const int min_in = 0;
+    static const int max_in = 32767;
+    static const int min_out = 1;
+    static const int max_out = 1024;
+    float slope = (float)(max_out - min_out) / (max_in - min_in);
+    float scale = (min_out + (cam_y - min_in) * slope);
+    return (int)((float)value * scale);
+}
+void key_input_callback(void* ud, enum BUTTON button, enum BUTTON_STATE state) {
+    if (state == PRESSED) buttons[button] = 1;
+    else buttons[button] = 0;
+}
+void mouse_input_callback(void* ud, int x, int y, enum BUTTON button, int state) {
+    if (x < 50) buttons[MOUSE_MARGIN_LEFT] = 200;
+    else buttons[MOUSE_MARGIN_LEFT] = 0;
+    if (x > pf_window_width() - 50) buttons[MOUSE_MARGIN_RIGHT] = 200;
+    else buttons[MOUSE_MARGIN_RIGHT] = 0;
+    if (y < 50) buttons[MOUSE_MARGIN_TOP] = 150;
+    else buttons[MOUSE_MARGIN_TOP] = 0;
+    if (y > pf_window_height() - 50) buttons[MOUSE_MARGIN_BOTTOM] = 150;
+    else buttons[MOUSE_MARGIN_BOTTOM] = 0;
+    if (button == MOUSE_MOVED) {
+        if (g_drag_active) {
+            g_drag_end_x = x;
+            g_drag_end_y = y;
+        }
+    }
+    if (button == MOUSE_SCROLL) buttons[MOUSE_SCROLL] += scaled(state);
+    if (button == MOUSE_SCROLL_SIDE) buttons[MOUSE_SCROLL_SIDE] -= scaled(state / 5);
+    if (button == MOUSE_LEFT || button == MOUSE_RIGHT || button == MOUSE_MIDDLE) {
+        if (state == PRESSED) {
+            // mouse click location
+            g_mouse_x = x;
+            g_mouse_y = y;
+            buttons[button] = 1;
+            // mouse drag location
+            g_drag_active  = 1;
+            g_drag_start_x = x;
+            g_drag_start_y = y;
+            g_drag_end_x   = x;
+            g_drag_end_y   = y;
+        }
+        else {
+            buttons[button] = 0;
+            g_drag_active = 0;
+        }
+    }
+    if (button == MOUSE_LEFT && state == PRESSED) {
+        g_want_pick = 1;
+    }
+}
+void process_inputs() {
+    if (buttons[KEYBOARD_ESCAPE]) {_exit(0);}
+    int amount = 1;
+    if (buttons[KEYBOARD_SHIFT]) { amount = 2; }
+    if (buttons[KEYBOARD_W]) { move_forward(scaled(amount));}
+    if (buttons[KEYBOARD_R]) { move_forward(-scaled(amount)); }
+    if (buttons[KEYBOARD_A]) { move_sideways(-scaled(amount)); }
+    if (buttons[KEYBOARD_S]) { move_sideways(scaled(amount)); }
+    if (buttons[MOUSE_MARGIN_LEFT]) { cam_yaw -= buttons[MOUSE_MARGIN_LEFT]; }
+    if (buttons[MOUSE_MARGIN_RIGHT]) { cam_yaw += buttons[MOUSE_MARGIN_RIGHT]; }
+    if (buttons[MOUSE_MARGIN_TOP]) { cam_pitch -= buttons[MOUSE_MARGIN_TOP]; }
+    if (buttons[MOUSE_MARGIN_BOTTOM]) { cam_pitch += buttons[MOUSE_MARGIN_BOTTOM]; }
+    if (buttons[MOUSE_SCROLL]) {
+        if (cam_y + buttons[MOUSE_SCROLL] < (32767 * 16) && cam_y + buttons[MOUSE_SCROLL] > 10)
+            cam_y += buttons[MOUSE_SCROLL];
+        buttons[MOUSE_SCROLL] = 0;
+    }
+    if (buttons[MOUSE_SCROLL_SIDE]) { cam_x -= buttons[MOUSE_SCROLL_SIDE]; buttons[MOUSE_SCROLL_SIDE] = 0; }
+}
+
+#pragma region SEPARATED VULKAN CODE
 #ifdef _WIN32
 #define VK_USE_PLATFORM_WIN32_KHR
 #define WIN32_LEAN_AND_MEAN
 #else
 #define VK_USE_PLATFORM_WAYLAND_KHR
-#include <time.h>
 #endif
 #include <vulkan/vulkan.h>
 #undef VkResult
 #define VkResult int
 #undef VkBool32
 #define VkBool32 unsigned
-
-extern const unsigned char shaders[];
-extern const unsigned char shaders_end[];
-#define shaders_len ((size_t)(shaders_end - shaders))
-
-// todo: create vk_shader (to have one big shader with multiple entrypoints, have shader hot reloading, ...)
-// todo: create vk_texture (loading textures, maybe hot reloading textures, ...)
 
 // 1 for double buffering (one of ours, two of present engine) (technically triple buffered, but vulkan doesn't seem to do actual double buffering)
 // one is being scanned out, one is done and waiting (this one is also considered 'presented' but not scanned out yet)
@@ -64,18 +160,8 @@ struct Renderer {
     double      gpu_ticks_to_ns;
     uint64_t    frame_id_counter;
     uint64_t    frame_id_per_slot[MAX_FRAMES_IN_FLIGHT];
-    f32         start_time_per_slot[MAX_FRAMES_IN_FLIGHT];
+    float         start_time_per_slot[MAX_FRAMES_IN_FLIGHT];
     #endif
-};
-
-struct Uniforms {
-    float camera_position[3]; // xyz
-    float camera_pitch_sin, camera_pitch_cos;
-    float camera_yaw_sin, camera_yaw_cos;
-    float time, delta; // seconds
-    u32 selected_object_id;
-    float drag_rect_start_x, drag_rect_start_y, drag_rect_end_x, drag_rect_end_y; // in uv
-    float click_world_pos_x, click_world_pos_z, drag_world_pos_x, drag_world_pos_z;
 };
 
 #if DEBUG_APP == 1
@@ -96,235 +182,16 @@ enum {
 #include "vk_util.h"
 #include "vk_machine.h"
 #include "vk_swapchain.h"
-#include "helper.h"
-#include "mesh.h"
-
-#pragma region HELPER
-void create_buffer_and_memory(VkDevice device, VkPhysicalDevice phys,
-                              VkDeviceSize size, VkBufferUsageFlags usage,
-                              VkMemoryPropertyFlags props,
-                              VkBuffer* out_buf, VkDeviceMemory* out_mem) {
-    VkBufferCreateInfo buf_info = {
-        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size  = size,
-        .usage = usage,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
-    };
-    VK_CHECK(vkCreateBuffer(device, &buf_info, NULL, out_buf));
-
-    VkMemoryRequirements mem_reqs;
-    vkGetBufferMemoryRequirements(device, *out_buf, &mem_reqs);
-
-    VkMemoryAllocateInfo alloc_info = {
-        .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .allocationSize  = mem_reqs.size,  // <-- use driver-required size
-        .memoryTypeIndex = find_memory_type_index(phys, mem_reqs.memoryTypeBits, props)
-    };
-    VK_CHECK(vkAllocateMemory(device, &alloc_info, NULL, out_mem));
-    VK_CHECK(vkBindBufferMemory(device, *out_buf, *out_mem, 0));
-}
-static void upload_to_buffer(VkDevice dev, VkDeviceMemory mem, size_t offset, const void *src, size_t bytes) {
-    void* dst = NULL;
-    VK_CHECK(vkMapMemory(dev, mem, offset, bytes, 0, &dst));
-    memcpy(dst, src, bytes);
-    vkUnmapMemory(dev, mem);
-}
-
-// --- Single-use command helpers (record/submit/wait) ---
-VkCommandBuffer begin_single_use_cmd(VkDevice device, VkCommandPool pool) {
-    VkCommandBufferAllocateInfo ai = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .commandPool = pool,
-        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = 1
-    };
-    VkCommandBuffer cmd;
-    VK_CHECK(vkAllocateCommandBuffers(device, &ai, &cmd));
-    VK_CHECK(vkBeginCommandBuffer(cmd, &(VkCommandBufferBeginInfo){
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
-    }));
-    return cmd;
-}
-void end_single_use_cmd(VkDevice device, VkQueue queue, VkCommandPool pool, VkCommandBuffer cmd) {
-    VK_CHECK(vkEndCommandBuffer(cmd));
-    VK_CHECK(vkQueueSubmit(queue, 1, &(VkSubmitInfo){
-        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .commandBufferCount = 1, .pCommandBuffers = &cmd
-    }, VK_NULL_HANDLE));
-    VK_CHECK(vkQueueWaitIdle(queue));
-    vkFreeCommandBuffers(device, pool, 1, &cmd);
-}
-
-// Create a DEVICE_LOCAL buffer and upload data via a temporary HOST_VISIBLE staging buffer.
-static void create_and_upload_device_local_buffer(
-    VkDevice device, VkPhysicalDevice phys, VkQueue queue, VkCommandPool pool,
-    VkDeviceSize size, VkBufferUsageFlags usage,
-    const void* src, VkBuffer* out_buf, VkDeviceMemory* out_mem,
-    VkDeviceSize dst_offset /*usually 0*/
-){
-    // 1) Create destination (DEVICE_LOCAL)
-    create_buffer_and_memory(device, phys, size, usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, out_buf, out_mem);
-
-    if (size == 0 || src == NULL) return; // nothing to upload
-
-    // 2) Create staging (HOST_VISIBLE|COHERENT, TRANSFER_SRC)
-    VkBuffer staging; VkDeviceMemory staging_mem;
-    create_buffer_and_memory(device, phys, size,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        &staging, &staging_mem);
-
-    // 3) Map+copy to staging
-    upload_to_buffer(device, staging_mem, 0, src, (size_t)size);
-
-    // 4) Record copy
-    VkCommandBuffer cmd = begin_single_use_cmd(device, pool);
-    VkBufferCopy copy = { .srcOffset = 0, .dstOffset = dst_offset, .size = size };
-    vkCmdCopyBuffer(cmd, staging, *out_buf, 1, &copy);
-    end_single_use_cmd(device, queue, pool, cmd);
-
-    // 5) Destroy staging
-    vkDestroyBuffer(device, staging, NULL);
-    vkFreeMemory(device, staging_mem, NULL);
-}
+#include "vk_texture.h"
 #pragma endregion
 
-#include "texture.h"
-#include "map.h"
-
-int g_want_pick = 0;
-int g_mouse_x = 0, g_mouse_y = 0;
-u32 selected_object_id = 0;
-void do_pick(struct Machine* machine, struct Swapchain* swapchain) {
-}
-
-// todo: avoid globals
-WINDOW w;
-i32 buttons[BUTTON_COUNT];
-int g_drag_active = 0;
-int g_drag_start_x = 0, g_drag_start_y = 0;
-int g_drag_end_x   = 0, g_drag_end_y   = 0;
-float cam_x = 0, cam_y = 2, cam_z = -5, cam_yaw = 0, cam_pitch = 0;
-void move_forward(int amount) {
-    double rad = (double)(cam_yaw) * 3.14159265f / 32767.0f;
-    i16 x_amount = (i16)lroundf(sinf(rad) * amount);
-    i16 z_amount = (i16)lroundf(cosf(rad) * amount);
-        cam_x += x_amount;
-        cam_z += z_amount;
-}
-void move_sideways(int amount) {
-    double rad = (double)(cam_yaw) * 3.14159265f / 32767.0f;
-    i16 x_amount = (i16)lroundf(cosf(rad) * amount);
-    i16 z_amount = (i16)lroundf(sinf(rad) * amount);
-        cam_x += x_amount;
-        cam_z -= z_amount;
-}
-int scaled(int value) {
-    static const int min_in = 0;
-    static const int max_in = 32767;
-    static const int min_out = 1;
-    static const int max_out = 1024;
-    float slope = (float)(max_out - min_out) / (max_in - min_in);
-    float scale = (min_out + (cam_y - min_in) * slope);
-    return (int)((float)value * scale);
-}
-void key_input_callback(void* ud, enum BUTTON button, enum BUTTON_STATE state) {
-    if (state == PRESSED) buttons[button] = 1;
-    else buttons[button] = 0;
-}
-void mouse_input_callback(void* ud, i32 x, i32 y, enum BUTTON button, int state) {
-    if (x < 50) buttons[MOUSE_MARGIN_LEFT] = 200;
-    else buttons[MOUSE_MARGIN_LEFT] = 0;
-    if (x > pf_window_width(w) - 50) buttons[MOUSE_MARGIN_RIGHT] = 200;
-    else buttons[MOUSE_MARGIN_RIGHT] = 0;
-    if (y < 50) buttons[MOUSE_MARGIN_TOP] = 150;
-    else buttons[MOUSE_MARGIN_TOP] = 0;
-    if (y > pf_window_height(w) - 50) buttons[MOUSE_MARGIN_BOTTOM] = 150;
-    else buttons[MOUSE_MARGIN_BOTTOM] = 0;
-    if (button == MOUSE_MOVED) {
-        if (g_drag_active) {
-            g_drag_end_x = x;
-            g_drag_end_y = y;
-        }
-    }
-    if (button == MOUSE_SCROLL) buttons[MOUSE_SCROLL] += scaled(state);
-    if (button == MOUSE_SCROLL_SIDE) buttons[MOUSE_SCROLL_SIDE] -= scaled(state / 5);
-    if (button == MOUSE_LEFT || button == MOUSE_RIGHT || button == MOUSE_MIDDLE) {
-        if (state == PRESSED) {
-            // mouse click location
-            g_mouse_x = x;
-            g_mouse_y = y;
-            buttons[button] = 1;
-            // mouse drag location
-            g_drag_active  = 1;
-            g_drag_start_x = x;
-            g_drag_start_y = y;
-            g_drag_end_x   = x;
-            g_drag_end_y   = y;
-        }
-        else {
-            buttons[button] = 0;
-            g_drag_active = 0;
-        }
-    }
-    if (button == MOUSE_LEFT && state == PRESSED) {
-        g_want_pick = 1;
-    }
-}
-void process_inputs() {
-    if (buttons[KEYBOARD_ESCAPE]) {_exit(0);}
-    int amount = 1;
-    if (buttons[KEYBOARD_SHIFT]) { amount = 2; }
-    if (buttons[KEYBOARD_W]) { move_forward(scaled(amount));}
-    if (buttons[KEYBOARD_R]) { move_forward(-scaled(amount)); }
-    if (buttons[KEYBOARD_A]) { move_sideways(-scaled(amount)); }
-    if (buttons[KEYBOARD_S]) { move_sideways(scaled(amount)); }
-    if (buttons[MOUSE_MARGIN_LEFT]) { cam_yaw -= buttons[MOUSE_MARGIN_LEFT]; } 
-    if (buttons[MOUSE_MARGIN_RIGHT]) { cam_yaw += buttons[MOUSE_MARGIN_RIGHT]; }
-    if (buttons[MOUSE_MARGIN_TOP]) { cam_pitch -= buttons[MOUSE_MARGIN_TOP]; }
-    if (buttons[MOUSE_MARGIN_BOTTOM]) { cam_pitch += buttons[MOUSE_MARGIN_BOTTOM]; }
-    if (buttons[MOUSE_SCROLL]) { 
-        if (cam_y + buttons[MOUSE_SCROLL] < (32767 * 16) && cam_y + buttons[MOUSE_SCROLL] > 10)
-            cam_y += buttons[MOUSE_SCROLL];
-        buttons[MOUSE_SCROLL] = 0;
-    }
-    if (buttons[MOUSE_SCROLL_SIDE]) { cam_x -= buttons[MOUSE_SCROLL_SIDE]; buttons[MOUSE_SCROLL_SIDE] = 0; }
-}
-#pragma region MAIN
 int main(void) {
-    {
-        // grid: 2000 x 2000 cells (2m blocks in 4km map)
-        const uint32_t GRID_W = 2000;
-
-        // test input cell positions
-        uint32_t cx[] = { 0, 1, 2, 10, 100, 999, 1500, 1999, 500, 1234 };
-        uint32_t cy[] = { 0, 0, 0,  5, 100, 999,  123, 1999,1500,  567 };
-
-        const int N = sizeof(cx) / sizeof(cx[0]);
-
-        printf("cx,cy -> key -> xor_hash  mul_hash\n");
-        printf("---------------------------------\n");
-
-        for (int i = 0; i < N; i++) {
-            // row-major cell key: 0 .. 3,999,999
-            uint32_t key = cy[i] * GRID_W + cx[i];
-
-            // XOR-fold hash (cheapest)
-            uint32_t xor_hash = (key ^ (key >> 16)) & 0xFFFFu;
-
-            // multiplicative hash (32-bit wrap is automatic in C)
-            uint32_t mul_hash = (key * 2654435761u) >> 16;
-
-            printf("%4u,%4u -> %7u -> %6u   %6u\n", cx[i], cy[i], key, xor_hash, mul_hash);
-        }
-    }
-    // setup with X11
+    // setup the platform window
     pf_time_reset();
-    w = pf_create_window(NULL, key_input_callback,mouse_input_callback);
+    pf_create_window(APP_NAME, NULL, key_input_callback,mouse_input_callback);
     pf_timestamp("Created platform window");
 
+    #pragma region SETUP VULKAN CODE
 #if defined(_WIN32) && DEBUG_VULKAN == 1
     extern int putenv(const char*);
     extern char* getenv(const char*);
@@ -344,16 +211,19 @@ int main(void) {
 #endif
 
     // setup vulkan on the machine
-    struct Machine machine = create_machine(w);
-    struct Swapchain swapchain = create_swapchain(&machine,w);
+    struct Machine machine = create_machine();
+    pf_timestamp("Logical device and queues created");
+    struct Swapchain swapchain = create_swapchain(&machine);
+    pf_timestamp("Swapchain created");
     struct Renderer renderer = {0};
-    
+
     printf("SCREEN SIZE: %d, %d\n", swapchain.swapchain_extent.width, swapchain.swapchain_extent.height);
-    printf("WINDOW SIZE: %d, %d\n", pf_window_width(w), pf_window_height(w));
+    printf("WINDOW SIZE: %d, %d\n", pf_window_width(), pf_window_height());
 
     // create shader module
-    VkShaderModuleCreateInfo smci={ .sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize=shaders_len, .pCode=(const u32*)shaders };
+    VkShaderModuleCreateInfo smci={ .sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize=shaders_len, .pCode=(const int*)shaders };
     VkShaderModule shader_module; VK_CHECK(vkCreateShaderModule(machine.device,&smci,NULL,&shader_module));
+    pf_timestamp("Shader module");
 
     #pragma region COMPUTE PIPELINE
     #define BINDINGS 21
@@ -422,7 +292,7 @@ int main(void) {
         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT,   .module = shader_module, .pName = "vs_main" },
         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = shader_module, .pName = "fs_main" }
     };
-    struct gpu_rendered_instance {u32 object_id, animation;};
+    struct gpu_rendered_instance {int object_id, animation;};
     VkVertexInputBindingDescription bindings_vi[1] = {
         { .binding = 0, .stride = sizeof(struct gpu_rendered_instance), .inputRate = VK_VERTEX_INPUT_RATE_INSTANCE }
     };
@@ -505,13 +375,11 @@ int main(void) {
 
     // destroy the shader module after using it
     vkDestroyShaderModule(machine.device, shader_module,  NULL);
+    pf_timestamp("pipelines");
+#pragma endregion
 
-    #pragma region BUFFERS
-    #include "plane_lod2.h"
-    #include "plane_lod3.h"
-    #include "plane_lod4.h"
-    #include "plane_lod5.h"
-    #include "plane_lod6.h"
+    #pragma region VULKAN BUFFERS
+    #include "plane.h"
 
     #define MAX_TOTAL_MESH_COUNT 1024
     enum mesh_type {
@@ -521,17 +389,17 @@ int main(void) {
         MESH_HEAD = 2,
         MESH_TYPE_COUNT
     };
-    u32 mesh_offsets[MESH_TYPE_COUNT];
+    int mesh_offsets[MESH_TYPE_COUNT];
     static struct Mesh meshes[MESH_TYPE_COUNT] = {
         [MESH_PLANE] = {
             .num_animations = 0, // special case with no frames, only indices
             .radius = 150.0f, // todo: we 5x it later, kinda hacky
             .lods = {
-                {.num_indices = 5766, /* lod 0: 961 quads, 31x31  */ .indices = g_indices_plane_lod2 },
-                {.num_indices = 1536, /* lod 1: 225 quads, 15x15  */ .indices = g_indices_plane_lod3 }, 
-                {.num_indices = 384,  /* lod 2: 49 quads, 7x7     */ .indices = g_indices_plane_lod4 },
-                {.num_indices = 54,   /* lod 3: 9 quads, 3x3      */ .indices = g_indices_plane_lod5 },
-                {.num_indices = 6,    /* lod 4: 1 quad, 128m wide */ .indices = g_indices_plane_lod6 }
+                {.num_indices = 5766, /* lod 0: 961 quads, 31x31  */ .indices = plane_32x32 },
+                {.num_indices = 1536, /* lod 1: 225 quads, 15x15  */ .indices = plane_16x16 },
+                {.num_indices = 384,  /* lod 2: 49 quads, 7x7     */ .indices = plane_8x8 },
+                {.num_indices = 54,   /* lod 3: 9 quads, 3x3      */ .indices = plane_4x4 },
+                {.num_indices = 6,    /* lod 4: 1 quad, 128m wide */ .indices = plane_2x2 }
             }
         },
         [MESH_BODY] = {0},
@@ -543,8 +411,8 @@ int main(void) {
     if (!load_mesh_blob(HEAD, HEAD_len, &meshes[MESH_HEAD])) {
         printf("Failed to load HEAD mesh\n");
     }
-    u32 total_mesh_count = 0;
-    for (u32 m = 0; m < MESH_TYPE_COUNT; ++m) {
+    int total_mesh_count = 0;
+    for (int m = 0; m < MESH_TYPE_COUNT; ++m) {
         mesh_offsets[m] = total_mesh_count;
         int amount = meshes[m].num_animations == 0 ? 1 : meshes[m].num_animations * ANIMATION_FRAMES; // special case for no animations
         total_mesh_count += amount * LOD_LEVELS;
@@ -565,14 +433,14 @@ int main(void) {
         OBJECT_TYPE_COUNT
     };
     #define MAX_MESH_LIST_SIZE 1024
-    u32 object_mesh_types[MAX_MESH_LIST_SIZE] = {
+    int object_mesh_types[MAX_MESH_LIST_SIZE] = {
         MESH_PLANE,
         MESH_BODY, MESH_HEAD
     };
-    u32 object_mesh_offsets[MAX_MESH_LIST_SIZE] = {0};
+    int object_mesh_offsets[MAX_MESH_LIST_SIZE] = {0};
     struct gpu_object_metadata {
-        u32 meshes_offset;
-        u32 mesh_count;
+        int meshes_offset;
+        int mesh_count;
         float radius;
     } object_metadata[OBJECT_TYPE_COUNT] = {
         [OBJECT_TYPE_PLANE] = {
@@ -582,11 +450,11 @@ int main(void) {
             .mesh_count = 2
         },
     };
-    u32 meshes_offset = 0;
-    for (u32 i = 0; i < OBJECT_TYPE_COUNT; ++i) {
+    int meshes_offset = 0;
+    for (int i = 0; i < OBJECT_TYPE_COUNT; ++i) {
         object_metadata[i].meshes_offset = meshes_offset;
         meshes_offset += object_metadata[i].mesh_count;
-        for (u32 m = 0; m < object_metadata[i].mesh_count; ++m) {
+        for (int m = 0; m < object_metadata[i].mesh_count; ++m) {
             object_mesh_offsets[object_metadata[i].meshes_offset + m] = mesh_offsets[object_mesh_types[object_metadata[i].meshes_offset + m]];
         }
         object_metadata[i].radius = meshes[object_mesh_types[object_metadata[i].meshes_offset]].radius * 5.0f; // double
@@ -594,15 +462,15 @@ int main(void) {
         printf("Object type %d has %d meshes, offset %d\n", i, object_metadata[i].mesh_count, object_metadata[i].meshes_offset);
     }
 
-    u32 total_vertex_count = 0;
-    u32 total_index_count = 0;
+    int total_vertex_count = 0;
+    int total_index_count = 0;
     struct VkDrawIndexedIndirectCommand mesh_info[MAX_TOTAL_MESH_COUNT];
-    u32 mesh_index = 0;
-    for (u32 m = 0; m < MESH_TYPE_COUNT; ++m) {
+    int mesh_index = 0;
+    for (int m = 0; m < MESH_TYPE_COUNT; ++m) {
         // loop over all frames of all animations, or once in special case for animations = 0
         int amount = meshes[m].num_animations == 0 ? 1 : meshes[m].num_animations * ANIMATION_FRAMES;
-        for (u32 i = 0; i < amount; ++i) {
-            for (u32 lod = 0; lod < LOD_LEVELS; ++lod) {
+        for (int i = 0; i < amount; ++i) {
+            for (int lod = 0; lod < LOD_LEVELS; ++lod) {
                 mesh_info[mesh_index].firstIndex   = total_index_count;
                 mesh_info[mesh_index].vertexOffset = total_vertex_count;
                 mesh_info[mesh_index].indexCount   = meshes[m].lods[lod].num_indices;
@@ -617,23 +485,23 @@ int main(void) {
 
     #define PLANE_CHUNK_COUNT 6400
 
-    struct unit {i16 x, y, next_x, next_y;};
+    struct unit {short x, y, next_x, next_y;};
     struct unit units[1] = {
         {.x = 0, .y = 0, .next_x = 5, .next_y = -10}
     };
-    #define UNIT_CHUNK_COUNT 10
+    #define UNIT_CHUNK_COUNT 1000
 
     #define TOTAL_CHUNK_COUNT (PLANE_CHUNK_COUNT + UNIT_CHUNK_COUNT)
 
     struct gpu_chunk { enum object_type object_type; };
     static struct gpu_chunk gpu_chunks[TOTAL_CHUNK_COUNT] = {0};
     // first 6400 are plane objects, id is zero so default zeroed works out
-    static struct object_chunks { u32 chunk_count, first_chunk; } scene[OBJECT_TYPE_COUNT] = {
+    static struct object_chunks { int chunk_count, first_chunk; } scene[OBJECT_TYPE_COUNT] = {
         [OBJECT_TYPE_PLANE] = { .chunk_count = PLANE_CHUNK_COUNT, .first_chunk = 0 },
         [OBJECT_TYPE_UNIT]  = { .chunk_count = UNIT_CHUNK_COUNT,  .first_chunk = PLANE_CHUNK_COUNT }
     };
 
-    struct gpu_object { float pos[2]; float step; u8 cos,sin; u8 pad[2];}; // padding to ensure 16b
+    struct gpu_object { float pos[2]; float step; char cos,sin; char pad[2];}; // padding to ensure 16b
     // todo: ideally we don't even have any plane objects/chunks in memory, as their data is not needed in the shader
     static struct gpu_object gpu_objects[TOTAL_CHUNK_COUNT * OBJECTS_PER_CHUNK];
 
@@ -647,36 +515,36 @@ int main(void) {
         gpu_objects[first_unit_object + i].pos[1] = (float)(i / 8);
         {
             float yaw = 0.0f;
-            gpu_objects[first_unit_object + i].cos = (((uint8_t)lrintf(cosf(yaw) * 127.0f)));
-            gpu_objects[first_unit_object + i].sin = (((uint8_t)lrintf(sinf(yaw) * 127.0f)));
+            gpu_objects[first_unit_object + i].cos = (((uint8_t)lrint(cosf(yaw) * 127.0f)));
+            gpu_objects[first_unit_object + i].sin = (((uint8_t)lrint(sinf(yaw) * 127.0f)));
         }
     }
 
     mesh_info[0].instanceCount = PLANE_CHUNK_COUNT * OBJECTS_PER_CHUNK; // hardcode first iteration for 6400 to avoid loop
     mesh_info[0].firstInstance = 0;
-    u32 total_chunk_count = PLANE_CHUNK_COUNT;
-    u32 total_object_count = PLANE_CHUNK_COUNT * OBJECTS_PER_CHUNK;
-    u32 total_instance_count = PLANE_CHUNK_COUNT * OBJECTS_PER_CHUNK * 1; // plane objects are made up of only one mesh
-    for (u32 i = 0; i < TOTAL_CHUNK_COUNT - PLANE_CHUNK_COUNT; ++i) {
-        u32 chunk_id = PLANE_CHUNK_COUNT + i;
-        u32 object_type = gpu_chunks[chunk_id].object_type;
-        u32 mesh_count = object_metadata[object_type].mesh_count;
-        for (u32 m = 0; m < mesh_count; ++m) {
+    int total_chunk_count = PLANE_CHUNK_COUNT;
+    int total_object_count = PLANE_CHUNK_COUNT * OBJECTS_PER_CHUNK;
+    int total_instance_count = PLANE_CHUNK_COUNT * OBJECTS_PER_CHUNK * 1; // plane objects are made up of only one mesh
+    for (int i = 0; i < TOTAL_CHUNK_COUNT - PLANE_CHUNK_COUNT; ++i) {
+        int chunk_id = PLANE_CHUNK_COUNT + i;
+        int type = gpu_chunks[chunk_id].object_type;
+        int mesh_count = object_metadata[type].mesh_count;
+        for (int m = 0; m < mesh_count; ++m) {
             // only base mesh gets the objects counted, not the lods/frames after it
-            u32 mesh_index = mesh_offsets[object_mesh_types[object_metadata[object_type].meshes_offset + m]]; // mesh id is the index of the base mesh in mesh_info
-            mesh_info[mesh_index].instanceCount += OBJECTS_PER_CHUNK; // count up the nr of each base mesh, set first instance later
+            int index = mesh_offsets[object_mesh_types[object_metadata[type].meshes_offset + m]]; // mesh id is the index of the base mesh in mesh_info
+            mesh_info[index].instanceCount += OBJECTS_PER_CHUNK; // count up the nr of each base mesh, set first instance later
         }
         total_instance_count += OBJECTS_PER_CHUNK * mesh_count; // one instance per mesh attached to object
         total_object_count += OBJECTS_PER_CHUNK;
         total_chunk_count += 1;
     }
     // set first instance for the mesh info
-    for (u32 m = 1; m < total_mesh_count; ++m) {
+    for (int m = 1; m < total_mesh_count; ++m) {
         mesh_info[m].firstInstance = mesh_info[m-1].firstInstance + mesh_info[m-1].instanceCount;
     }
     
     // movement grid (131kb)
-    struct block { u64 tiles[4][4]; }; // 16 8b tiles per block, 128 bytes matching double cacheline, 32x32 bit per block 
+    struct block { unsigned long long tiles[4][4]; }; // 16 8b tiles per block, 128 bytes matching double cacheline, 32x32 bit per block
     static struct block passable_tiles[32][32]; // 1024x1024 grid becomes 32x32 times a 32x32 block, each block 16 64bit, 1bit for passable vs impassable
 
     VkDeviceSize size_visible_chunk_ids = total_chunk_count * sizeof(uint32_t);
@@ -688,7 +556,7 @@ int main(void) {
     VkDeviceSize size_rendered_instances = total_instance_count * sizeof(struct gpu_rendered_instance);
     VkDeviceSize size_draw_calls  = total_mesh_count * sizeof(VkDrawIndexedIndirectCommand);
     
-    u32 bucket_count = 131072u; // assume for now 131k buckets, which means ok collisions up to about 60k units, could be fine for more, needs to be tested
+    int bucket_count = 131072u; // assume for now 131k buckets, which means ok collisions up to about 60k units, could be fine for more, needs to be tested
     VkDeviceSize size_buckets = bucket_count * 16 * sizeof(uint32_t); // 16 max units in a 2mx2m bucket, 64 bytes -> 8mb
     VkDeviceSize size_units = sizeof(units);
 
@@ -756,7 +624,7 @@ int main(void) {
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_buckets, &renderer.memory_buckets);
 
     // UNIFORMS (host visible)
-    create_buffer_and_memory(machine.device, machine.physical_device, sizeof(struct Uniforms),
+    create_buffer_and_memory(machine.device, machine.physical_device, sizeof(struct uniforms),
         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         &renderer.buffer_uniforms, &renderer.memory_uniforms);
@@ -849,12 +717,12 @@ int main(void) {
 
     // upload the data per mesh (later, when data is huge, batch into one big command to upload everything)
     mesh_index = 0;
-    for (u32 m = 0; m < MESH_TYPE_COUNT; ++m) {
-        u32 anim_count = meshes[m].num_animations == 0 ? 1 : meshes[m].num_animations; // special case for no animations
-        u32 frame_count = meshes[m].num_animations == 0 ? 1 : ANIMATION_FRAMES; // special case for no animations to one frame
-        for (u32 a = 0; a < anim_count; ++a) {
-            for (u32 f = 0; f < frame_count; ++f) {
-                for (u32 lod = 0; lod < LOD_LEVELS; ++lod) {
+    for (int m = 0; m < MESH_TYPE_COUNT; ++m) {
+        int anim_count = meshes[m].num_animations == 0 ? 1 : meshes[m].num_animations; // special case for no animations
+        int frame_count = meshes[m].num_animations == 0 ? 1 : ANIMATION_FRAMES; // special case for no animations to one frame
+        for (int a = 0; a < anim_count; ++a) {
+            for (int f = 0; f < frame_count; ++f) {
+                for (int lod = 0; lod < LOD_LEVELS; ++lod) {
                     // vertices
                     if (meshes[m].animations[a].frames[f].lods[lod].positions) {
                         VkDeviceSize bytes = meshes[m].lods[lod].num_vertices * sizeof(uint32_t);
@@ -969,8 +837,6 @@ int main(void) {
         vkFreeMemory(machine.device, staging_mem, NULL);
     }
 
-    // todo: we need this still for the pick readback region, why?
-    // vkDestroyCommandPool(machine.device, upload_pool, NULL);
     pf_timestamp("Uploads complete");
 
     // --- Descriptor pool & set (unchanged, but note buffers are now DEVICE_LOCAL) ---
@@ -1014,11 +880,13 @@ int main(void) {
         {renderer.buffer_object_metadata, 0, size_object_metadata},
         {renderer.buffer_buckets, 0, size_buckets},
         {renderer.buffer_units, 0, size_units},
-        {renderer.buffer_uniforms, 0, sizeof(struct Uniforms)}
+        {renderer.buffer_uniforms, 0, sizeof(struct uniforms)}
     };
-    #pragma region TEXTURES
+
     create_textures(&machine, &swapchain);
-    update_detail_region_and_upload(&machine, &swapchain, 531, 1041);
+    create_detail_region(531, 1041); // fills in the arrays
+    upload_detail_texture_pair(&machine, &swapchain,
+        g_detail_terrain, g_detail_height, DETAIL_UPSCALED_W, DETAIL_UPSCALED_H);
     VkDescriptorImageInfo tex_infos[MAX_TEXTURES];
     fill_texture_descriptor_infos(tex_infos, MAX_TEXTURES);
     VkDescriptorImageInfo detail_tex_infos[MAX_DETAIL_TEXTURES];
@@ -1065,6 +933,7 @@ int main(void) {
 
 #pragma endregion
 
+    #pragma region VULKAN SYNC
     VkSemaphoreTypeCreateInfo type_info = {
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
         .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
@@ -1075,7 +944,6 @@ int main(void) {
     VK_CHECK(vkCreateSemaphore(machine.device, &tsci, NULL, &render_timeline));
     uint64_t timeline_value = 0;
 
-    #pragma region FRAME LOOP
     #if DEBUG_APP == 1
     renderer.frame_id_counter = 1;
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
@@ -1116,9 +984,11 @@ int main(void) {
     //     VK_CHECK(vkCreateSemaphore(machine.device, &semaphore_info, NULL, &parking_semaphores[i]));
     //     vkAcquireNextImageKHR(machine.device, swapchain.swapchain, UINT64_MAX, parking_semaphores[i], VK_NULL_HANDLE, &parked_images[i]);
     // }
+#pragma endregion
 
+    // todo: immediate mode + limit to max ca. 30% margin extra fps (60->~90)
     renderer.frame_slot = 0;
-    while (pf_poll_events(w)) {
+    while (pf_poll_events()) {
         uint64_t wait_value = timeline_value; // for MAX_FRAMES_IN_FLIGHT == 1
         // If you ever increase MAX_FRAMES_IN_FLIGHT to N, use:
         // uint64_t wait_value = renderer.timeline_value - (MAX_FRAMES_IN_FLIGHT - 1);
@@ -1137,10 +1007,10 @@ int main(void) {
                 if (!presented_frame_id) continue;
                 VkResult r = vkWaitForPresentKHR(machine.device, swapchain.swapchain, presented_frame_id, 0); // timeout zero for non-blocking
                 if (r == VK_SUCCESS || r == VK_ERROR_DEVICE_LOST) { // -4 device lost instead of success somehow...
-                    f32 present_time = (f32) (pf_ns_now() - pf_ns_start()) / 1e6;
+                    float present_time = (float) (pf_ns_now() - pf_ns_start()) / 1e6;
                     printf("[%llu] presented at %.3f ms\n",presented_frame_id, present_time);
                     presented_frame_ids[i] = 0; // clear slot
-                    f32 latency = present_time - renderer.start_time_per_slot[i];
+                    float latency = present_time - renderer.start_time_per_slot[i];
                     // presented means its ready to be scanned out, still has to wait up to 16ms for vsync for actual scanout
                     printf("[%llu] latency until 'present' %.3f ms\n", presented_frame_id, latency);
                 } else printf("[%llu] wait for present KHR not successful somehow with code %d\n", presented_frame_id, r);
@@ -1208,7 +1078,7 @@ int main(void) {
         uint32_t swap_image_index = 0;
         VkResult acquire_result = vkAcquireNextImageKHR(machine.device, swapchain.swapchain, UINT64_MAX, renderer.sem_image_available[renderer.frame_slot], VK_NULL_HANDLE, &swap_image_index);
         // recreate the swapchain if the window resized
-        if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) { recreate_swapchain(&machine, &renderer, &swapchain, w); continue; }
+        if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) { recreate_swapchain(&machine, &renderer, &swapchain); continue; }
         if (acquire_result != VK_SUCCESS && acquire_result != VK_SUBOPTIMAL_KHR) { printf("vkAcquireNextImageKHR failed: %s\n", vk_result_str(acquire_result)); break; }
         
         #pragma region HANDLE INPUT
@@ -1218,7 +1088,7 @@ int main(void) {
         static float click_world_x, click_world_y, click_world_z;
         static float drag_world_x, drag_world_y, drag_world_z;
 
-        // rect to ndc
+        // drag rect
         float rect_x0 = 0.0f, rect_y0 = 0.0f;
         float rect_x1 = 0.0f, rect_y1 = 0.0f;
         int   rect_valid = 0;
@@ -1347,7 +1217,7 @@ int main(void) {
             }
             vkUnmapMemory(machine.device, swapchain.pick_region_memory);
             // dedupe
-            qsort(tmp_ids, tmp_count, sizeof(u32), compare_u32);
+            qsort(tmp_ids, tmp_count, sizeof(int), compare_int);
             // Unique pass
             uint32_t unique_count = 0;
             for (uint32_t i = 0; i < tmp_count; ++i) {
@@ -1357,16 +1227,25 @@ int main(void) {
             }
             // Use the result
             for (uint32_t i = 0; i < unique_count; ++i) {
-                // printf("Selected object: %u\n", tmp_ids[i]);
+                printf("Selected object: %u\n", tmp_ids[i]);
             }
         }
-        
-        struct Uniforms u = {0};
-        encode_uniforms(&u, cam_x, cam_y, cam_z, cam_yaw, cam_pitch);
 
-        // READBACK DEPTH
+        // setup uniforms
+        struct uniforms u = {0};
+        float pitch_radians = cam_pitch / 32767.0f * PI;
+        float yaw_radians = cam_yaw / 32767.0f * PI;
+        u.camera_x = cam_x;
+        u.camera_y = cam_y;
+        u.camera_z = cam_z;
+        u.camera_pitch_sin = sinf(pitch_radians);
+        u.camera_pitch_cos = cosf(pitch_radians);
+        u.camera_yaw_sin = sinf(yaw_radians);
+        u.camera_yaw_cos = cosf(yaw_radians);
+
+        // CLICK WORLD POSITION USING DEPTH
         if (buttons[MOUSE_RIGHT]) {
-            u32 x, y;
+            int x, y;
             if (click_world_x == 0 && click_world_z == 0) {
                 x = (uint32_t)g_drag_start_x;
                 y = (uint32_t)g_drag_start_y;
@@ -1423,11 +1302,8 @@ int main(void) {
             memcpy(&depth, ptr, sizeof(float));
             vkUnmapMemory(machine.device, swapchain.depth_readback_memory);
             // interpret depth -> world position
-            float fov_y_radians = 60.0f * 3.14159265359f / 180.0f;   // MUST match shader
-            float proj_scale_y  = 1.0f / tanf(fov_y_radians * 0.5f);
-            float aspect_ratio  = 16.0f / 9.0f;                      // MUST match shader
+            float proj_scale_y  = 1.0f / tanf(fov_y_radians * 0.5f); // must match shader -> need fix
             float proj_scale_x  = proj_scale_y / aspect_ratio;
-            float near_plane    = 5.0f;                              // MUST match shader
             if (depth > 0.0f) {
                 float ndc_x =  2.0f * ((x + 0.5f) / (float)swapchain.swapchain_extent.width)  - 1.0f;
                 float ndc_y =  1.0f - 2.0f * ((y + 0.5f) / (float)swapchain.swapchain_extent.height);
@@ -1448,9 +1324,9 @@ int main(void) {
                 float pos_x =  cy * vx + sy * z_yaw;  // position.x in meters
                 float pos_z = -sy * vx + cy * z_yaw;  // position.z in meters
 
-                float cam_world_x = u.camera_position[0] / 10.0f;
-                float cam_world_y = u.camera_position[1] / 10.0f;  // *** THIS WAS THE BIG MISSING /10 ***
-                float cam_world_z = u.camera_position[2] / 10.0f;
+                float cam_world_x = u.camera_x / 10.0f;
+                float cam_world_y = u.camera_y / 10.0f;  // *** THIS WAS THE BIG MISSING /10 ***
+                float cam_world_z = u.camera_z / 10.0f;
 
                 if (click_world_x == 0 && click_world_z == 0) {
                     click_world_x = cam_world_x + pos_x;
@@ -1466,7 +1342,7 @@ int main(void) {
             }
         }
 
-        // do pick
+        // SELECT OBJECT
         vkQueueWaitIdle(machine.queue_graphics);
         if (g_want_pick) {
             g_want_pick = 0;
@@ -1530,9 +1406,9 @@ int main(void) {
             }
         }
 
-        #pragma region update uniforms
+        #pragma region upload uniforms
         static float frame_time = 0;
-        float current_time = (f32) (pf_ns_now() - pf_ns_start()) / 1e9; // seconds since application startup
+        float current_time = (float) (pf_ns_now() - pf_ns_start()) / 1e9; // seconds since application startup
         u.time = frame_time; // seconds since application startup
         u.delta = frame_time == 0 ? 0 : current_time - frame_time;
         frame_time = current_time;
@@ -1553,15 +1429,16 @@ int main(void) {
         VK_CHECK(vkMapMemory(machine.device, renderer.memory_uniforms, 0, sizeof u, 0, &dst));
         memcpy(dst, &u, sizeof u);
         vkUnmapMemory(machine.device, renderer.memory_uniforms);
-        
-        
+        #pragma endregion
+
         // actual recording the rendering commands
-        f32 frame_start_time = (f32) (pf_ns_now() - pf_ns_start()) / 1e6;
+        float frame_start_time = (float) (pf_ns_now() - pf_ns_start()) / 1e6;
         VkCommandBuffer cmd = swapchain.command_buffers_per_image[swap_image_index];
         if (!swapchain.command_buffers_recorded[swap_image_index]) {
             VkCommandBufferBeginInfo begin_info = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
             // VK_CHECK(vkResetCommandBuffer(cmd, 0)); // don't need to reset if recorded once and reused
             VK_CHECK(vkBeginCommandBuffer(cmd, &begin_info));
+
             #if DEBUG_APP == 1
             uint32_t q0 = swap_image_index * QUERIES_PER_IMAGE + 0; // index of the first query of this frame
             vkCmdResetQueryPool(cmd, swapchain.query_pool, q0, QUERIES_PER_IMAGE);
@@ -1584,7 +1461,6 @@ int main(void) {
             // VISIBLE CHUNKS PASS
             vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,renderer.common_pipeline_layout, 0, 1, &renderer.descriptor_set, 0, NULL);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, renderer.compute_pipeline);
-            enum mode {CHUNK_PASS, OBJECT_PASS, PREFIX_PASS, SCATTER_PASS, UI_MODE, FENCE_MODE, SEA_MODE, MESH_MODE, SKY_MODE};
             enum mode mode = CHUNK_PASS;
             vkCmdPushConstants(cmd, renderer.common_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(enum mode), &mode);
             vkCmdDispatch(cmd, (total_chunk_count+63)/64, 1, 1);
@@ -1600,11 +1476,12 @@ int main(void) {
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, swapchain.query_pool, q0 + Q_CHUNKS);
             #endif
 
-            // zero the bucket counts
+            // CLEAR COLLISION BUCKETS
             vkCmdFillBuffer(cmd, renderer.buffer_buckets, 0, size_buckets, 0);
             VkBufferMemoryBarrier2 bc_clear_to_cs =
                 buf_barrier2(ST_XFER, VK_ACCESS_2_TRANSFER_WRITE_BIT, ST_CS, AC_SRD | AC_SWR, renderer.buffer_buckets, 0, VK_WHOLE_SIZE);
             cmd_barrier2(cmd, NULL, 0, &bc_clear_to_cs, 1, NULL, 0);
+
             // VISIBLE OBJECTS PASS
             vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,renderer.common_pipeline_layout, 0, 1, &renderer.descriptor_set, 0, NULL);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, renderer.compute_pipeline);
@@ -1618,7 +1495,7 @@ int main(void) {
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, swapchain.query_pool, q0 + Q_OBJECTS);
             #endif
             
-            // PREPARE INDIRECT PASS
+            // PREFIX PASS
             mode = PREFIX_PASS;
             vkCmdPushConstants(cmd, renderer.common_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(enum mode), &mode);
             vkCmdDispatch(cmd, 1, 1, 1);
@@ -1637,8 +1514,8 @@ int main(void) {
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, swapchain.query_pool, q0 + Q_PREPARE);
             #endif
 
-            cmd_barrier2(cmd, NULL, 0, &bc_clear_to_cs, 1, NULL, 0);
             // SCATTER PASS
+            cmd_barrier2(cmd, NULL, 0, &bc_clear_to_cs, 1, NULL, 0);
             mode = SCATTER_PASS;
             vkCmdPushConstants(cmd, renderer.common_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(enum mode), &mode);
             vkCmdDispatchIndirect(cmd, renderer.buffer_indirect_workgroups, 0);
@@ -1656,7 +1533,7 @@ int main(void) {
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, swapchain.query_pool, q0 + Q_SCATTER);
             #endif
 
-            // --- render pass (use persistent framebuffer) ---
+            // RENDER PASS
             VkImageMemoryBarrier2 to_depth = img_barrier2(
                 VK_PIPELINE_STAGE_2_NONE, 0, ST_EFT, AC_DSWR | AC_DSRD,VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
                 swapchain.depth_image, VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1);
@@ -1826,14 +1703,14 @@ int main(void) {
         #endif
         VkResult present_res = vkQueuePresentKHR(machine.queue_present, &present_info);
         if (present_res == VK_ERROR_OUT_OF_DATE_KHR || present_res == VK_SUBOPTIMAL_KHR) {
-            recreate_swapchain(&machine, &renderer, &swapchain, w);
+            recreate_swapchain(&machine, &renderer, &swapchain);
             continue;
         } else if (present_res != VK_SUCCESS) {
             printf("vkQueuePresentKHR failed: %d\n", present_res);
             break;
         }
 
-        f32 frame_end_time = (f32) (pf_ns_now() - pf_ns_start()) / 1e6;
+        float frame_end_time = (float) (pf_ns_now() - pf_ns_start()) / 1e6;
         #if DEBUG_CPU == 1
         printf("cpu time %.3fms - %.3fms [%.3fms]\n", frame_start_time, frame_end_time, frame_end_time - frame_start_time);
         #endif
