@@ -1,8 +1,306 @@
 #ifdef _WIN32
 #include "header.h"
 
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
+#ifndef WINAPI
+#  if defined(_M_IX86) || defined(__i386__)
+#    define WINAPI __stdcall
+#  else
+#    define WINAPI
+#  endif
+#endif
+
+#ifndef CALLBACK
+#  define CALLBACK WINAPI
+#endif
+
+#ifndef APIENTRY
+#  define APIENTRY WINAPI
+#endif
+
+#ifndef CONST
+#  define CONST const
+#endif
+
+#ifndef NULL
+#  define NULL ((void*)0)
+#endif
+
+#ifndef TRUE
+#  define TRUE 1
+#  define FALSE 0
+#endif
+
+#ifndef PF_WINAPI_IMPORT
+#  if defined(_MSC_VER)
+#    define PF_WINAPI_IMPORT __declspec(dllimport)
+#  else
+#    define PF_WINAPI_IMPORT
+#  endif
+#endif
+
+/* ---------- exact-width-ish ABI types without stdint.h ---------- */
+
+typedef void                VOID;
+typedef int                 BOOL;
+typedef unsigned char       BYTE;
+typedef unsigned short      WORD;
+typedef unsigned int        UINT;
+typedef short               SHORT;
+typedef long                LONG;
+typedef unsigned long       DWORD;
+typedef long long           LONGLONG;
+typedef unsigned long long  ULONGLONG;
+
+#if defined(_WIN64) || defined(__x86_64__) || defined(__aarch64__)
+typedef long long           LONG_PTR;
+typedef unsigned long long  ULONG_PTR;
+#else
+typedef long                LONG_PTR;
+typedef unsigned long       ULONG_PTR;
+#endif
+
+typedef ULONG_PTR           DWORD_PTR;
+typedef ULONG_PTR           UINT_PTR;
+typedef LONG_PTR            INT_PTR;
+typedef UINT_PTR            WPARAM;
+typedef LONG_PTR            LPARAM;
+typedef LONG_PTR            LRESULT;
+
+typedef WORD                ATOM;
+typedef void*               HANDLE;
+typedef HANDLE              HWND;
+typedef HANDLE              HINSTANCE;
+typedef HANDLE              HMODULE;
+typedef HANDLE              HICON;
+typedef HANDLE              HCURSOR;
+typedef HANDLE              HBRUSH;
+typedef HANDLE              HMENU;
+typedef HANDLE              HMONITOR;
+typedef const unsigned short*      LPCWSTR;
+typedef unsigned short*            LPWSTR;
+typedef void*               LPVOID;
+
+/* ---------- structs ---------- */
+
+typedef struct tagPOINT {
+    LONG x;
+    LONG y;
+} POINT;
+
+typedef struct tagRECT {
+    LONG left;
+    LONG top;
+    LONG right;
+    LONG bottom;
+} RECT;
+
+typedef union _LARGE_INTEGER {
+    struct {
+        DWORD LowPart;
+        LONG HighPart;
+    };
+    LONGLONG QuadPart;
+} LARGE_INTEGER;
+
+typedef struct tagMSG {
+    HWND   hwnd;
+    UINT   message;
+    WPARAM wParam;
+    LPARAM lParam;
+    DWORD  time;
+    POINT  pt;
+} MSG;
+
+typedef LRESULT (CALLBACK *WNDPROC)(HWND, UINT, WPARAM, LPARAM);
+
+typedef struct tagWNDCLASSW {
+    UINT        style;
+    WNDPROC     lpfnWndProc;
+    int         cbClsExtra;
+    int         cbWndExtra;
+    HINSTANCE   hInstance;
+    HICON       hIcon;
+    HCURSOR     hCursor;
+    HBRUSH      hbrBackground;
+    LPCWSTR     lpszMenuName;
+    LPCWSTR     lpszClassName;
+} WNDCLASSW;
+
+typedef struct tagMONITORINFO {
+    DWORD cbSize;
+    RECT  rcMonitor;
+    RECT  rcWork;
+    DWORD dwFlags;
+} MONITORINFO;
+
+/* Must match Win32 layout sufficiently for EnumDisplaySettingsW */
+typedef struct _DEVMODEW {
+    unsigned short dmDeviceName[32];
+    WORD    dmSpecVersion;
+    WORD    dmDriverVersion;
+    WORD    dmSize;
+    WORD    dmDriverExtra;
+    DWORD   dmFields;
+
+    LONG    dmPosition_x;
+    LONG    dmPosition_y;
+    DWORD   dmDisplayOrientation;
+    DWORD   dmDisplayFixedOutput;
+
+    SHORT   dmColor;
+    SHORT   dmDuplex;
+    SHORT   dmYResolution;
+    SHORT   dmTTOption;
+    SHORT   dmCollate;
+    unsigned short dmFormName[32];
+    WORD    dmLogPixels;
+    DWORD   dmBitsPerPel;
+    DWORD   dmPelsWidth;
+    DWORD   dmPelsHeight;
+    DWORD   dmDisplayFlags;
+    DWORD   dmDisplayFrequency;
+
+    DWORD   dmICMMethod;
+    DWORD   dmICMIntent;
+    DWORD   dmMediaType;
+    DWORD   dmDitherType;
+    DWORD   dmReserved1;
+    DWORD   dmReserved2;
+    DWORD   dmPanningWidth;
+    DWORD   dmPanningHeight;
+} DEVMODEW;
+
+typedef struct _SECURITY_ATTRIBUTES {
+    DWORD  nLength;
+    LPVOID lpSecurityDescriptor;
+    BOOL   bInheritHandle;
+} SECURITY_ATTRIBUTES, *PSECURITY_ATTRIBUTES, *LPSECURITY_ATTRIBUTES;
+
+/* ---------- constants ---------- */
+
+#define WS_POPUP                    0x80000000L
+#define WS_EX_APPWINDOW             0x00040000L
+
+#define SW_SHOW                     5
+#define SW_SHOWMAXIMIZED            3
+
+#define SWP_NOSIZE                  0x0001
+#define SWP_NOMOVE                  0x0002
+#define SWP_NOZORDER                0x0004
+#define SWP_NOOWNERZORDER           0x0200
+#define SWP_FRAMECHANGED            0x0020
+#define SWP_SHOWWINDOW              0x0040
+
+#define PM_REMOVE                   0x0001
+
+#define GWLP_USERDATA               (-21)
+
+#define SM_CXSCREEN                 0
+#define SM_CYSCREEN                 1
+
+#define MONITOR_DEFAULTTOPRIMARY    0x00000001
+#define ENUM_CURRENT_SETTINGS       ((DWORD)-1)
+
+#define WM_SIZE                     0x0005
+#define WM_CLOSE                    0x0010
+#define WM_QUIT                     0x0012
+#define WM_SHOWWINDOW               0x0018
+#define WM_KEYDOWN                  0x0100
+#define WM_KEYUP                    0x0101
+#define WM_SYSKEYDOWN               0x0104
+#define WM_SYSKEYUP                 0x0105
+#define WM_MOUSEMOVE                0x0200
+#define WM_LBUTTONDOWN              0x0201
+#define WM_LBUTTONUP                0x0202
+#define WM_RBUTTONDOWN              0x0204
+#define WM_RBUTTONUP                0x0205
+#define WM_MBUTTONDOWN              0x0207
+#define WM_MBUTTONUP                0x0208
+#define WM_MOUSEWHEEL               0x020A
+#define WM_MOUSEHWHEEL              0x020E
+#define WM_DESTROY                  0x0002
+
+#define VK_BACK                     0x08
+#define VK_TAB                      0x09
+#define VK_RETURN                   0x0D
+#define VK_SHIFT                    0x10
+#define VK_CONTROL                  0x11
+#define VK_MENU                     0x12
+#define VK_ESCAPE                   0x1B
+#define VK_SPACE                    0x20
+#define VK_PRIOR                    0x21
+#define VK_NEXT                     0x22
+#define VK_END                      0x23
+#define VK_HOME                     0x24
+#define VK_LEFT                     0x25
+#define VK_UP                       0x26
+#define VK_RIGHT                    0x27
+#define VK_DOWN                     0x28
+#define VK_INSERT                   0x2D
+#define VK_DELETE                   0x2E
+#define VK_LWIN                     0x5B
+#define VK_RWIN                     0x5C
+#define VK_LSHIFT                   0xA0
+#define VK_RSHIFT                   0xA1
+#define VK_LCONTROL                 0xA2
+#define VK_RCONTROL                 0xA3
+#define VK_LMENU                    0xA4
+#define VK_RMENU                    0xA5
+#define VK_F1                       0x70
+#define VK_F2                       0x71
+#define VK_F3                       0x72
+#define VK_F4                       0x73
+#define VK_F5                       0x74
+#define VK_F6                       0x75
+#define VK_F7                       0x76
+#define VK_F8                       0x77
+#define VK_F9                       0x78
+#define VK_F10                      0x79
+#define VK_F11                      0x7A
+#define VK_F12                      0x7B
+
+#define WHEEL_DELTA                 120
+
+#define IDC_ARROW                   ((LPCWSTR)((ULONG_PTR)32512))
+#define HWND_TOP                    ((HWND)0)
+#define HWND_TOPMOST                ((HWND)(LONG_PTR)-1)
+
+/* ---------- helper macros ---------- */
+
+#define LOWORD(l) ((WORD)((DWORD_PTR)(l) & 0xffff))
+#define HIWORD(l) ((WORD)(((DWORD_PTR)(l) >> 16) & 0xffff))
+#define GET_X_LPARAM(lp) ((int)(short)LOWORD(lp))
+#define GET_Y_LPARAM(lp) ((int)(short)HIWORD(lp))
+#define GET_WHEEL_DELTA_WPARAM(wp) ((short)HIWORD(wp))
+
+/* ---------- functions ---------- */
+
+PF_WINAPI_IMPORT BOOL     WINAPI QueryPerformanceFrequency(LARGE_INTEGER*);
+PF_WINAPI_IMPORT BOOL     WINAPI QueryPerformanceCounter(LARGE_INTEGER*);
+PF_WINAPI_IMPORT HMODULE  WINAPI GetModuleHandleW(LPCWSTR);
+PF_WINAPI_IMPORT ATOM     WINAPI RegisterClassW(const WNDCLASSW*);
+PF_WINAPI_IMPORT int      WINAPI GetSystemMetrics(int);
+PF_WINAPI_IMPORT HWND     WINAPI CreateWindowExW(
+    DWORD, LPCWSTR, LPCWSTR, DWORD, int, int, int, int,
+    HWND, HMENU, HINSTANCE, LPVOID);
+PF_WINAPI_IMPORT LONG_PTR WINAPI SetWindowLongPtrW(HWND, int, LONG_PTR);
+PF_WINAPI_IMPORT LONG_PTR WINAPI GetWindowLongPtrW(HWND, int);
+PF_WINAPI_IMPORT BOOL     WINAPI SetWindowPos(HWND, HWND, int, int, int, int, UINT);
+PF_WINAPI_IMPORT BOOL     WINAPI ShowWindow(HWND, int);
+PF_WINAPI_IMPORT BOOL     WINAPI SetForegroundWindow(HWND);
+PF_WINAPI_IMPORT HMONITOR WINAPI MonitorFromWindow(HWND, DWORD);
+PF_WINAPI_IMPORT BOOL     WINAPI GetMonitorInfoW(HMONITOR, MONITORINFO*);
+PF_WINAPI_IMPORT HCURSOR  WINAPI LoadCursorW(HINSTANCE, LPCWSTR);
+PF_WINAPI_IMPORT BOOL     WINAPI PeekMessageW(MSG*, HWND, UINT, UINT, UINT);
+PF_WINAPI_IMPORT BOOL     WINAPI TranslateMessage(const MSG*);
+PF_WINAPI_IMPORT LRESULT  WINAPI DispatchMessageW(const MSG*);
+PF_WINAPI_IMPORT LRESULT  WINAPI DefWindowProcW(HWND, UINT, WPARAM, LPARAM);
+PF_WINAPI_IMPORT BOOL     WINAPI DestroyWindow(HWND);
+PF_WINAPI_IMPORT void     WINAPI PostQuitMessage(int);
+PF_WINAPI_IMPORT BOOL     WINAPI EnumDisplaySettingsW(LPCWSTR, DWORD, DEVMODEW*);
+PF_WINAPI_IMPORT BOOL     WINAPI ScreenToClient(HWND, POINT*);
+PF_WINAPI_IMPORT void     WINAPI ExitProcess(UINT);
+
 #ifndef WM_MOUSEHWHEEL
 #define WM_MOUSEHWHEEL 0x020E
 #endif
@@ -16,20 +314,20 @@
 
 /* --- high-resolution clock --- */
 static LARGE_INTEGER qpf = {0};
-u64 pf_ticks_to_ns(u64 qpc){
+long long pf_ticks_to_ns(long long qpc){
     if (!qpf.QuadPart){ QueryPerformanceFrequency(&qpf); }
-    return (u64)(qpc * 1000000000ULL / (u64)qpf.QuadPart);
+    return (long long)(qpc * 1000000000ULL / (long long)qpf.QuadPart);
 }
-u64 pf_ns_now(void){
+long long pf_ns_now(void){
     LARGE_INTEGER qpc; QueryPerformanceCounter(&qpc);
     return pf_ticks_to_ns(qpc.QuadPart);
 }
-static u64 T0_ns = 0;
-u64 pf_ns_start(void){ return T0_ns; }
+static long long T0_ns = 0;
+long long pf_ns_start(void){ return T0_ns; }
 void pf_time_reset(void){ T0_ns = pf_ns_now(); }
 void pf_timestamp(char* msg){
-    u64 t = pf_ns_now();
-    printf("[+%7.3f ms] %s\n", (double)(i64)(t - T0_ns)/1e6, msg ? msg : "");
+    long long t = pf_ns_now();
+    printf("[+%7.3f ms] %s\n", (double)(long long)(t - T0_ns)/1e6, msg ? msg : "");
 }
 
 /* --- window state --- */
@@ -46,7 +344,7 @@ struct win32_window {
     void*       cb_ud;
 
     /* timing (rough; default 60 Hz) */
-    u64 refresh_ns;
+    long long refresh_ns;
 } window;
 
 /* forward decl for wndproc */
@@ -72,18 +370,18 @@ int pf_poll_events(WINDOW p){
 }
 
 /* --- present feedback stub (no-op on pure Win32; keep parity) --- */
-void pf_request_present_feedback(WINDOW p, u64 frame_id){ (void)p; (void)frame_id; }
+void pf_request_present_feedback(WINDOW p, long long frame_id){ (void)p; (void)frame_id; }
 
 /* --- create fullscreen borderless window --- */
 WINDOW pf_create_window(void* ud, KEYBOARD_CB key_cb, MOUSE_CB mouse_cb){
     HINSTANCE hi = GetModuleHandleW(NULL);
 
     /* estimate refresh (best-effort, default 60 Hz) */
-    u64 refresh_ns = 16666667ull;
+    long long refresh_ns = 16666667ull;
     DEVMODEW dm = {0}; dm.dmSize = sizeof(dm);
     if (EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency >= 30){
         double hz = (double)dm.dmDisplayFrequency;
-        refresh_ns = (u64)(1e9 / (hz > 1.0 ? hz : 60.0));
+        refresh_ns = (long long)(1e9 / (hz > 1.0 ? hz : 60.0));
     }
 
     /* register class (idempotent ok) */

@@ -1,40 +1,27 @@
 #ifdef __linux__
 #include "header.h"
-
 #include <time.h>
-// sudo apt install libwayland-dev (for getting the wayland-client header and lib)
-#include <wayland-client.h>
-// sudo apt install wayland-protocols wayland-scanner (for generating the xdg-shell files)
-// sudo wayland-scanner client-header /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml /usr/include/xdg-shell-client-protocol.h
-// sudo wayland-scanner private-code /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml /usr/include/xdg-shell-client-protocol.c
-#include <xdg-shell-client-protocol.h>
-#include <xdg-shell-client-protocol.c>
-// sudo wayland-scanner client-header /usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml /usr/include/presentation-time-client-protocol.h
-// sudo wayland-scanner private-code /usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml /usr/include/presentation-time-client-protocol.c
-#include <presentation-time-client-protocol.h>
-#include <presentation-time-client-protocol.c>
-// sudo wayland-scanner client-header /usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml /usr/include/drm-lease-v1-client-protocol.h
-// sudo wayland-scanner private-code /usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml /usr/include/drm-lease-v1-client-protocol.c
-// #include <drm-lease-v1-client-protocol.h>
-// #include <drm-lease-v1-client-protocol.c>
-// sudo apt install libxkbcommon-dev
-#include <xkbcommon/xkbcommon.h>
-
-// todo: get rid of these and also of the calloc down in create_window
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include "platform/vendor/wayland-client.h"
+#include "platform/vendor/xdg-shell-client-protocol.h"
+#include "platform/vendor/xdg-shell-client-protocol.c"
+#include "platform/vendor/presentation-time-client-protocol.h"
+#include "platform/vendor/presentation-time-client-protocol.c"
+#include "platform/vendor/xkbcommon.h"
+
 static clockid_t clockid;
-u64 pf_ns_now(void){
+long long pf_ns_now(void){
     struct timespec ts; clock_gettime(clockid ? clockid : CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec*1000000000ull + (uint64_t)ts.tv_nsec;
+    return (long long)ts.tv_sec*1000000000ll + (long long)ts.tv_nsec;
 }
-u64 T0;
-u64 pf_ns_start(void){ return T0; }
+long long T0;
+long long pf_ns_start(void){ return T0; }
 void pf_time_reset() {T0=pf_ns_now();}
 void pf_timestamp(char *msg) {
     #if DEBUG_CPU == 1
-    u64 _t=pf_ns_now(); 
+    unsigned long long _t=pf_ns_now(); 
     printf("[+%7.3f ms] %s\n",(_t-T0)/1e6,(msg));
     #endif
 }
@@ -137,11 +124,11 @@ struct wayland_window {
     struct xdg_toplevel* xdg_toplevel;
 
     struct wp_presentation* presentation;
-    u64 frame_id;
-    uint64_t refresh_ns;          // from wp_presentation (fallback 16.666 ms)
-    uint64_t last_present_ns;     // compositor-reported present time (scanout)
-    uint64_t last_feedback_ns;    // CPU time when feedback callback ran
-    uint64_t phase_ns;            // smoothed present phase (optional)
+    unsigned long long frame_id;
+    unsigned long long refresh_ns;          // from wp_presentation (fallback 16.666 ms)
+    unsigned long long last_present_ns;     // compositor-reported present time (scanout)
+    unsigned long long last_feedback_ns;    // CPU time when feedback callback ran
+    unsigned long long phase_ns;            // smoothed present phase (optional)
     double   phase_alpha;         // EMA coefficient (0..1)
 
     // inputs
@@ -157,8 +144,8 @@ struct wayland_window {
     int                 kbd_repeat_delay;  // ms
 
     // keep state
-    i32 win_w, win_h;
-    i32 mouse_x, mouse_y;
+    int win_w, win_h;
+    int mouse_x, mouse_y;
     int frame_done;
     int fullscreen_configured;
     int visible;
@@ -170,9 +157,9 @@ struct wayland_window {
     void *callback_data;
 };
 
-void kb_enter(void* data, struct wl_keyboard* k, u32 serial, struct wl_surface* surface, struct wl_array* keys) { }
-void kb_leave(void* data, struct wl_keyboard* k, u32 serial, struct wl_surface* surface) { }
-void kb_keymap(void* data, struct wl_keyboard* k, u32 format, i32 fd, u32 size) {
+void kb_enter(void* data, struct wl_keyboard* k, unsigned int serial, struct wl_surface* surface, struct wl_array* keys) { }
+void kb_leave(void* data, struct wl_keyboard* k, unsigned int serial, struct wl_surface* surface) { }
+void kb_keymap(void* data, struct wl_keyboard* k, unsigned int format, int fd, unsigned int size) {
     struct wayland_window* w = data;
     if (!w) { close(fd); return; }
 
@@ -204,8 +191,8 @@ void kb_keymap(void* data, struct wl_keyboard* k, u32 format, i32 fd, u32 size) 
     w->xkb_state = xkb_state_new(w->xkb_keymap);
 }
 
-void kb_modifiers(void* data, struct wl_keyboard* k, u32 serial,
-                  u32 dep, u32 lat, u32 lock, u32 group) {
+void kb_modifiers(void* data, struct wl_keyboard* k, unsigned int serial,
+                  unsigned int dep, unsigned int lat, unsigned int lock, unsigned int group) {
     struct wayland_window* w = data;
     if (!w || !w->xkb_state) return;
 
@@ -216,7 +203,7 @@ void kb_modifiers(void* data, struct wl_keyboard* k, u32 serial,
     );
 }
 
-void kb_repeat_info(void* data, struct wl_keyboard* k, i32 rate, i32 delay) {
+void kb_repeat_info(void* data, struct wl_keyboard* k, int rate, int delay) {
     struct wayland_window* w = data;
     if (!w) return;
     // rate: repeats per second (0 => disabled), delay: ms before first repeat
@@ -224,7 +211,7 @@ void kb_repeat_info(void* data, struct wl_keyboard* k, i32 rate, i32 delay) {
     w->kbd_repeat_delay = delay;
 }
 
-void kb_key(void* data, struct wl_keyboard* k, u32 serial, u32 time, u32 key, u32 state) {
+void kb_key(void* data, struct wl_keyboard* k, unsigned int serial, unsigned int time, unsigned int key, unsigned int state) {
     struct wayland_window* w = data;
     if (!w || !w->on_key) return;
 
@@ -255,31 +242,31 @@ const struct wl_keyboard_listener* get_kb_listener(void){
     return &kb_l;
 }
 
-void ptr_enter(void* d, struct wl_pointer* p, u32 serial, struct wl_surface* s, wl_fixed_t sx, wl_fixed_t sy){
+void ptr_enter(void* d, struct wl_pointer* p, unsigned int serial, struct wl_surface* s, wl_fixed_t sx, wl_fixed_t sy){
     struct wayland_window* w = d;
     if (!w) return;
     w->mouse_x = wl_fixed_to_int(sx);
     w->mouse_y = wl_fixed_to_int(sy);
     if (w->on_mouse) w->on_mouse(w->callback_data, w->mouse_x, w->mouse_y, MOUSE_MOVED, 0u);
 }
-void ptr_leave(void* d, struct wl_pointer* p, u32 serial, struct wl_surface* s){ }
-void ptr_motion(void* d, struct wl_pointer* p, u32 time, wl_fixed_t sx, wl_fixed_t sy){
+void ptr_leave(void* d, struct wl_pointer* p, unsigned int serial, struct wl_surface* s){ }
+void ptr_motion(void* d, struct wl_pointer* p, unsigned int time, wl_fixed_t sx, wl_fixed_t sy){
     struct wayland_window* w = d;
     if (!w) return;
     w->mouse_x = wl_fixed_to_int(sx);
     w->mouse_y = wl_fixed_to_int(sy);
     if (w->on_mouse) w->on_mouse(w->callback_data, w->mouse_x, w->mouse_y, MOUSE_MOVED, 0u);
 }
-void ptr_button(void* d, struct wl_pointer* p, u32 serial, u32 time, u32 button, u32 state){
+void ptr_button(void* d, struct wl_pointer* p, unsigned int serial, unsigned int time, unsigned int button, unsigned int state){
     struct wayland_window* w = d;
     if (!w) return;
-    u32 mb = BUTTON_UNKNOWN;
+    unsigned int mb = BUTTON_UNKNOWN;
     if (button == 272) mb = MOUSE_LEFT;
     if (button == 273) mb = MOUSE_RIGHT;
     if (button == 274) mb = MOUSE_MIDDLE;
     if (w->on_mouse) w->on_mouse(w->callback_data, w->mouse_x, w->mouse_y, mb, state);
 }
-void ptr_axis(void* d, struct wl_pointer* p, uint32_t time, uint32_t axis, wl_fixed_t value) {
+void ptr_axis(void* d, struct wl_pointer* p, unsigned int time, unsigned int axis, wl_fixed_t value) {
     struct wayland_window* w = d;
     if (!w) return;
     double val = wl_fixed_to_double(value);
@@ -295,11 +282,11 @@ void ptr_axis(void* d, struct wl_pointer* p, uint32_t time, uint32_t axis, wl_fi
     if (b != BUTTON_UNKNOWN && w->on_mouse) w->on_mouse(w->callback_data, w->mouse_x, w->mouse_y, b, wl_fixed_to_int(value));
 }
 void ptr_frame(void* d, struct wl_pointer* p){ }
-void ptr_axis_source(void* d, struct wl_pointer* p, u32 source){ }
-void ptr_axis_stop(void* d, struct wl_pointer* p, u32 time, u32 axis){ }
-void ptr_axis_discrete(void* d, struct wl_pointer* p, u32 axis, i32 discrete){ }
-void ptr_axis_value120(void* d, struct wl_pointer* p, u32 axis, i32 value120){ }
-void ptr_axis_relative_direction(void* d, struct wl_pointer* p, u32 axis, u32 direction){ }
+void ptr_axis_source(void* d, struct wl_pointer* p, unsigned int source){ }
+void ptr_axis_stop(void* d, struct wl_pointer* p, unsigned int time, unsigned int axis){ }
+void ptr_axis_discrete(void* d, struct wl_pointer* p, unsigned int axis, int discrete){ }
+void ptr_axis_value120(void* d, struct wl_pointer* p, unsigned int axis, int value120){ }
+void ptr_axis_relative_direction(void* d, struct wl_pointer* p, unsigned int axis, unsigned int direction){ }
 
 const struct wl_pointer_listener* get_ptr_listener(void){
     static const struct wl_pointer_listener ptr_l = {
@@ -318,7 +305,7 @@ const struct wl_pointer_listener* get_ptr_listener(void){
     return &ptr_l;
 }
 
-void seat_capabilities(void* d, struct wl_seat* s, u32 caps){
+void seat_capabilities(void* d, struct wl_seat* s, unsigned int caps){
     struct wayland_window* w = d;
     if (!w) return;
     if ((caps & WL_SEAT_CAPABILITY_KEYBOARD) && !w->kbd){
@@ -337,12 +324,12 @@ const struct wl_seat_listener* get_seat_listener(void){
     return &seat_l;
 }
 
-void xdg_ping(void* d, struct xdg_wm_base* b, u32 s){ xdg_wm_base_pong(b, s); }
+void xdg_ping(void* d, struct xdg_wm_base* b, unsigned int s){ xdg_wm_base_pong(b, s); }
 const struct xdg_wm_base_listener* get_xdg_wm_listener(void){
     static const struct xdg_wm_base_listener l = { .ping = xdg_ping };
     return &l;
 }
-void top_config(void* d, struct xdg_toplevel* t, i32 w, i32 h, struct wl_array* st){
+void top_config(void* d, struct xdg_toplevel* t, int w, int h, struct wl_array* st){
     struct wayland_window* win = d;
     if (win && w > 0 && h > 0) {
         win->win_w = w; win->win_h = h;
@@ -358,7 +345,7 @@ void top_config(void* d, struct xdg_toplevel* t, i32 w, i32 h, struct wl_array* 
             wl_surface_commit(win->surface);
         }
         int active = 0, fullscreen = 0;
-        uint32_t *s;
+        unsigned int *s;
         wl_array_for_each(s, st){
             if (*s == XDG_TOPLEVEL_STATE_ACTIVATED) active = 1;
             if (*s == XDG_TOPLEVEL_STATE_FULLSCREEN) fullscreen = 1;
@@ -368,7 +355,7 @@ void top_config(void* d, struct xdg_toplevel* t, i32 w, i32 h, struct wl_array* 
     }
 }
 void top_close(void* d, struct xdg_toplevel* t){ }
-void top_bounds(void* d, struct xdg_toplevel* t, i32 w, i32 h){ }
+void top_bounds(void* d, struct xdg_toplevel* t, int w, int h){ }
 void top_caps(void* d, struct xdg_toplevel* t, struct wl_array* c){ }
 
 const struct xdg_toplevel_listener* get_top_listener(void){
@@ -378,7 +365,7 @@ const struct xdg_toplevel_listener* get_top_listener(void){
     return &top_l;
 }
 
-void xsurf_conf(void* d, struct xdg_surface* s, u32 serial){
+void xsurf_conf(void* d, struct xdg_surface* s, unsigned int serial){
     struct wayland_window* w = d;
     xdg_surface_ack_configure(s, serial);
 }
@@ -396,7 +383,7 @@ static const struct wl_surface_listener* get_surface_listener(void){
     return &L;
 }
 
-static void pres_clock_id(void* d, struct wp_presentation* p, uint32_t c) {
+static void pres_clock_id(void* d, struct wp_presentation* p, unsigned int c) {
     struct wayland_window* w = d;
     clockid = (clockid_t)c;    /* POSIX clockid_t for clock_gettime() */
     pf_timestamp("presentation clock ready");
@@ -406,23 +393,23 @@ static const struct wp_presentation_listener* get_pres_listener(void){
     return &L;
 }
 
-void reg_add(void* d, struct wl_registry* r, uint32_t name, const char* iface, uint32_t ver){
+void reg_add(void* d, struct wl_registry* r, unsigned int name, const char* iface, unsigned int ver){
     struct wayland_window* w = d;
     if (!w) return;
     if (!strcmp(iface, wl_compositor_interface.name)){
-        u32 v = ver < 4 ? ver : 4; w->compositor = wl_registry_bind(r, name, &wl_compositor_interface, v);
+        unsigned int v = ver < 4 ? ver : 4; w->compositor = wl_registry_bind(r, name, &wl_compositor_interface, v);
     } else if (!strcmp(iface, xdg_wm_base_interface.name)){
-        u32 v = ver < 6 ? ver : 6; w->xdg_wm_base = wl_registry_bind(r, name, &xdg_wm_base_interface, v);
+        unsigned int v = ver < 6 ? ver : 6; w->xdg_wm_base = wl_registry_bind(r, name, &xdg_wm_base_interface, v);
         xdg_wm_base_add_listener(w->xdg_wm_base, get_xdg_wm_listener(), w);
     } else if (!strcmp(iface, wl_seat_interface.name)){
-        u32 v = ver < 5 ? ver : 5; w->seat = wl_registry_bind(r, name, &wl_seat_interface, v);
+        unsigned int v = ver < 5 ? ver : 5; w->seat = wl_registry_bind(r, name, &wl_seat_interface, v);
         wl_seat_add_listener(w->seat, get_seat_listener(), w);
     } else if (!strcmp(iface, wp_presentation_interface.name)) {
         w->presentation = wl_registry_bind(r, name, &wp_presentation_interface, 1);
         wp_presentation_add_listener(w->presentation, get_pres_listener(), w);
     }
 }
-void reg_rem(void* d, struct wl_registry* r, u32 name){}
+void reg_rem(void* d, struct wl_registry* r, unsigned int name){}
 
 const struct wl_registry_listener* get_registry_listener(void){
     static const struct wl_registry_listener reg_l = { .global = reg_add, .global_remove = reg_rem };
@@ -431,30 +418,30 @@ const struct wl_registry_listener* get_registry_listener(void){
 
 struct FBUserData {
     struct wayland_window* w;
-    uint64_t id;
-    uint64_t queued_ns;     // when we asked for feedback (just before present)
+    unsigned long long id;
+    unsigned long long queued_ns;     // when we asked for feedback (just before present)
 };
 static void fb_sync_output(void* data, struct wp_presentation_feedback* fb, struct wl_output* out){
 }
 static void fb_presented(void* data, struct wp_presentation_feedback* fb,
-    uint32_t tv_sec_hi, uint32_t tv_sec_lo, uint32_t tv_nsec,
-    uint32_t refresh_ns, uint32_t seq_hi, uint32_t seq_lo, uint32_t flags)
+    unsigned int tv_sec_hi, unsigned int tv_sec_lo, unsigned int tv_nsec,
+    unsigned int refresh_ns, unsigned int seq_hi, unsigned int seq_lo, unsigned int flags)
 {
     struct FBUserData* ud = data;
     struct wayland_window* w = ud->w;
 
-    uint64_t sec = ((uint64_t)tv_sec_hi<<32) | tv_sec_lo;
-    uint64_t t_present = sec*1000000000ull + (uint64_t)tv_nsec;
-    uint64_t t_now     = pf_ns_now();
+    unsigned long long sec = ((unsigned long long)tv_sec_hi<<32) | tv_sec_lo;
+    unsigned long long t_present = sec*1000000000ull + (unsigned long long)tv_nsec;
+    unsigned long long t_now     = pf_ns_now();
 
-    if (refresh_ns) w->refresh_ns = (uint64_t)refresh_ns;
+    if (refresh_ns) w->refresh_ns = (unsigned long long)refresh_ns;
     w->last_present_ns = t_present;
     w->in_flight_count > 0 ? w->in_flight_count-- : 0;
 
-    double queued_ms = (double)(int64_t)(ud->queued_ns - T0)/1e6;
-    double presented_ms = (double)(int64_t)(t_present - T0)/1e6;
-    double fbqueue_to_present_ms= (double)(int64_t)(t_present - ud->queued_ns)/1e6;
-    double predicted_next_ms      = (double)(int64_t)(refresh_ns + t_present - T0)/1e6;
+    double queued_ms = (double)(long long)(ud->queued_ns - T0)/1e6;
+    double presented_ms = (double)(long long)(t_present - T0)/1e6;
+    double fbqueue_to_present_ms= (double)(long long)(t_present - ud->queued_ns)/1e6;
+    double predicted_next_ms      = (double)(long long)(refresh_ns + t_present - T0)/1e6;
 
     printf("Frame %llu sent to vulkan at %.3f ms and presented at %.3f (%.3f ms later) (next present expected at %.3f)\n",
            (unsigned long long)ud->id, queued_ms, presented_ms, fbqueue_to_present_ms, predicted_next_ms);
@@ -476,7 +463,7 @@ static const struct wp_presentation_feedback_listener* get_fb_listener(void){
     return &L;
 }
 
-void pf_request_present_feedback(void *win, u64 frame_id) {
+void pf_request_present_feedback(void *win, unsigned long long frame_id) {
     struct wayland_window* w = win;
     if (!w || !w->presentation || !w->surface) return;
     w->in_flight_count++;
@@ -487,7 +474,7 @@ void pf_request_present_feedback(void *win, u64 frame_id) {
     wp_presentation_feedback_add_listener(wp_presentation_feedback(w->presentation, w->surface), get_fb_listener(), ud);
 }
 
-static void frame_cb_done(void *data, struct wl_callback *cb, uint32_t time) {
+static void frame_cb_done(void *data, struct wl_callback *cb, unsigned int time) {
     struct wayland_window *w = data;
     if (cb) wl_callback_destroy(cb);
     w->in_flight_count > 0 ? --w->in_flight_count : 0;
