@@ -192,7 +192,6 @@ static void upload_to_buffer(VkDevice dev, VkDeviceMemory mem, size_t offset, co
     vkUnmapMemory(dev, mem);
 }
 
-// --- Single-use command helpers (record/submit/wait) ---
 VkCommandBuffer begin_single_use_cmd(VkDevice device, VkCommandPool pool) {
     VkCommandBufferAllocateInfo ai = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,

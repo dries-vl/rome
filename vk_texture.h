@@ -37,13 +37,24 @@ enum {
     DETAIL_TEXTURE_TERRAIN = 0,
     DETAIL_TEXTURE_HEIGHT = 1
 };
+
 static Texture textures[MAX_TEXTURES];
 static Texture detail_textures[MAX_DETAIL_TEXTURES];
 static Texture dummy_texture;
 static VkSampler global_sampler;
 static uint32_t texture_count = 0;
 
-static void create_image_2d_mipped(VkDevice dev, VkPhysicalDevice phys, uint32_t w, uint32_t h, VkFormat format, uint32_t mipLevels, VkImageUsageFlags usage, VkImage* out_img, VkDeviceMemory* out_mem) {
+static void create_image_2d_mipped(
+    VkDevice dev,
+    VkPhysicalDevice phys,
+    uint32_t w,
+    uint32_t h,
+    VkFormat format,
+    uint32_t mipLevels,
+    VkImageUsageFlags usage,
+    VkImage* out_img,
+    VkDeviceMemory* out_mem
+) {
     VkImageCreateInfo ici;
     memset(&ici, 0, sizeof(ici));
     ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -67,12 +78,22 @@ static void create_image_2d_mipped(VkDevice dev, VkPhysicalDevice phys, uint32_t
     memset(&mai, 0, sizeof(mai));
     mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     mai.allocationSize = mr.size;
-    mai.memoryTypeIndex = find_memory_type_index(phys, mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    mai.memoryTypeIndex = find_memory_type_index(
+        phys,
+        mr.memoryTypeBits,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+    );
     VK_CHECK(vkAllocateMemory(dev, &mai, NULL, out_mem));
     VK_CHECK(vkBindImageMemory(dev, *out_img, *out_mem, 0));
 }
 
-static void create_view_2d_mipped(VkDevice dev, VkImage img, VkFormat fmt, uint32_t mipLevels, VkImageView* out_view) {
+static void create_view_2d_mipped(
+    VkDevice dev,
+    VkImage img,
+    VkFormat fmt,
+    uint32_t mipLevels,
+    VkImageView* out_view
+) {
     VkImageViewCreateInfo vci;
     memset(&vci, 0, sizeof(vci));
     vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -87,14 +108,31 @@ static void create_view_2d_mipped(VkDevice dev, VkImage img, VkFormat fmt, uint3
     VK_CHECK(vkCreateImageView(dev, &vci, NULL, out_view));
 }
 
-static void upload_image_2d(VkDevice dev, VkPhysicalDevice phys, VkQueue q, VkCommandPool pool, VkImage image, uint32_t w, uint32_t h, const void* pixels, VkDeviceSize size) {
+static void upload_image_2d(
+    VkDevice dev,
+    VkPhysicalDevice phys,
+    VkQueue q,
+    VkCommandPool pool,
+    VkImage image,
+    uint32_t w,
+    uint32_t h,
+    const void* pixels,
+    VkDeviceSize size
+) {
     VkBuffer staging;
     VkDeviceMemory staging_mem;
-    create_buffer_and_memory(dev, phys, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &staging, &staging_mem);
+    create_buffer_and_memory(
+        dev,
+        phys,
+        size,
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        &staging,
+        &staging_mem
+    );
     upload_to_buffer(dev, staging_mem, 0, pixels, size);
 
-    VkCommandBuffer cmd;
-    cmd = begin_single_use_cmd(dev, pool);
+    VkCommandBuffer cmd = begin_single_use_cmd(dev, pool);
 
     VkImageMemoryBarrier2 to_copy;
     memset(&to_copy, 0, sizeof(to_copy));
@@ -129,14 +167,24 @@ static void upload_image_2d(VkDevice dev, VkPhysicalDevice phys, VkQueue q, VkCo
     region.imageExtent.width = w;
     region.imageExtent.height = h;
     region.imageExtent.depth = 1;
-    vkCmdCopyBufferToImage(cmd, staging, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    vkCmdCopyBufferToImage(
+        cmd,
+        staging,
+        image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1,
+        &region
+    );
 
     VkImageMemoryBarrier2 to_shader;
     memset(&to_shader, 0, sizeof(to_shader));
     to_shader.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
     to_shader.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
     to_shader.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-    to_shader.dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    to_shader.dstStageMask =
+        VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
     to_shader.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
     to_shader.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     to_shader.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -159,136 +207,316 @@ static void upload_image_2d(VkDevice dev, VkPhysicalDevice phys, VkQueue q, VkCo
     vkFreeMemory(dev, staging_mem, NULL);
 }
 
-struct KTX2Header {
-    uint8_t identifier[12];
-    uint32_t vkFormat;
-    uint32_t typeSize;
-    uint32_t pixelWidth;
-    uint32_t pixelHeight;
-    uint32_t pixelDepth;
-    uint32_t layerCount;
-    uint32_t faceCount;
-    uint32_t levelCount;
-    uint32_t supercompressionScheme;
-    uint32_t dfdByteOffset;
-    uint32_t dfdByteLength;
-    uint32_t kvdByteOffset;
-    uint32_t kvdByteLength;
-    uint64_t sgdByteOffset;
-    uint64_t sgdByteLength;
+/* ---------- DDS BC loader ---------- */
+
+#define DDS_MAGIC 0x20534444u /* "DDS " */
+#define DDS_FOURCC(a,b,c,d) ((uint32_t)(uint8_t)(a) | ((uint32_t)(uint8_t)(b) << 8) | ((uint32_t)(uint8_t)(c) << 16) | ((uint32_t)(uint8_t)(d) << 24))
+
+#define DDSD_MIPMAPCOUNT 0x00020000u
+#define DDPF_FOURCC      0x00000004u
+
+typedef struct DDS_PIXELFORMAT {
+    uint32_t size;
+    uint32_t flags;
+    uint32_t fourCC;
+    uint32_t rgbBitCount;
+    uint32_t rBitMask;
+    uint32_t gBitMask;
+    uint32_t bBitMask;
+    uint32_t aBitMask;
+} DDS_PIXELFORMAT;
+
+typedef struct DDS_HEADER {
+    uint32_t size;
+    uint32_t flags;
+    uint32_t height;
+    uint32_t width;
+    uint32_t pitchOrLinearSize;
+    uint32_t depth;
+    uint32_t mipMapCount;
+    uint32_t reserved1[11];
+    DDS_PIXELFORMAT ddspf;
+    uint32_t caps;
+    uint32_t caps2;
+    uint32_t caps3;
+    uint32_t caps4;
+    uint32_t reserved2;
+} DDS_HEADER;
+
+typedef struct DDS_HEADER_DXT10 {
+    uint32_t dxgiFormat;
+    uint32_t resourceDimension;
+    uint32_t miscFlag;
+    uint32_t arraySize;
+    uint32_t miscFlags2;
+} DDS_HEADER_DXT10;
+
+/* DXGI_FORMAT values we need */
+enum {
+    DXGI_FORMAT_BC1_TYPELESS         = 70,
+    DXGI_FORMAT_BC1_UNORM            = 71,
+    DXGI_FORMAT_BC1_UNORM_SRGB       = 72,
+    DXGI_FORMAT_BC2_TYPELESS         = 73,
+    DXGI_FORMAT_BC2_UNORM            = 74,
+    DXGI_FORMAT_BC2_UNORM_SRGB       = 75,
+    DXGI_FORMAT_BC3_TYPELESS         = 76,
+    DXGI_FORMAT_BC3_UNORM            = 77,
+    DXGI_FORMAT_BC3_UNORM_SRGB       = 78,
+    DXGI_FORMAT_BC4_TYPELESS         = 79,
+    DXGI_FORMAT_BC4_UNORM            = 80,
+    DXGI_FORMAT_BC4_SNORM            = 81,
+    DXGI_FORMAT_BC5_TYPELESS         = 82,
+    DXGI_FORMAT_BC5_UNORM            = 83,
+    DXGI_FORMAT_BC5_SNORM            = 84
 };
 
-struct KTX2LevelIndex {
-    uint64_t byteOffset;
-    uint64_t byteLength;
-    uint64_t uncompressedByteLength;
-};
+typedef struct DDSInfo {
+    VkFormat format;
+    uint32_t width;
+    uint32_t height;
+    uint32_t mipLevels;
+    const uint8_t* data;
+    size_t dataSize;
+} DDSInfo;
 
-static int parse_ktx2_header_and_levels(const uint8_t* bytes, size_t len, struct KTX2Header* out_hdr, struct KTX2LevelIndex* out_levels, uint32_t* out_level_count) {
-    if (len < sizeof(struct KTX2Header)) {
-        printf("KTX2: too small for header\n");
+static int device_supports_bc(VkPhysicalDevice phys) {
+    VkPhysicalDeviceFeatures features;
+    memset(&features, 0, sizeof(features));
+    vkGetPhysicalDeviceFeatures(phys, &features);
+    return features.textureCompressionBC ? 1 : 0;
+}
+
+static int format_supports_sampled_image(VkPhysicalDevice phys, VkFormat format) {
+    VkFormatProperties props;
+    vkGetPhysicalDeviceFormatProperties(phys, format, &props);
+    return (props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
+}
+
+static uint32_t bc_block_size_bytes(VkFormat format) {
+    switch (format) {
+        case VK_FORMAT_BC1_RGB_UNORM_BLOCK:
+        case VK_FORMAT_BC1_RGB_SRGB_BLOCK:
+        case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
+        case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
+        case VK_FORMAT_BC4_UNORM_BLOCK:
+        case VK_FORMAT_BC4_SNORM_BLOCK:
+            return 8;
+
+        case VK_FORMAT_BC2_UNORM_BLOCK:
+        case VK_FORMAT_BC2_SRGB_BLOCK:
+        case VK_FORMAT_BC3_UNORM_BLOCK:
+        case VK_FORMAT_BC3_SRGB_BLOCK:
+        case VK_FORMAT_BC5_UNORM_BLOCK:
+        case VK_FORMAT_BC5_SNORM_BLOCK:
+            return 16;
+
+        default:
+            return 0;
+    }
+}
+
+static size_t bc_mip_size_bytes(VkFormat format, uint32_t w, uint32_t h) {
+    uint32_t blockSize = bc_block_size_bytes(format);
+    uint32_t bw = (w + 3u) / 4u;
+    uint32_t bh = (h + 3u) / 4u;
+    return (size_t)bw * (size_t)bh * (size_t)blockSize;
+}
+
+static int dds_dxgi_to_vk(uint32_t dxgi, VkFormat* out_format) {
+    switch (dxgi) {
+        case DXGI_FORMAT_BC1_UNORM:      *out_format = VK_FORMAT_BC1_RGBA_UNORM_BLOCK; return 1;
+        case DXGI_FORMAT_BC1_UNORM_SRGB: *out_format = VK_FORMAT_BC1_RGBA_SRGB_BLOCK;  return 1;
+        case DXGI_FORMAT_BC2_UNORM:      *out_format = VK_FORMAT_BC2_UNORM_BLOCK;       return 1;
+        case DXGI_FORMAT_BC2_UNORM_SRGB: *out_format = VK_FORMAT_BC2_SRGB_BLOCK;        return 1;
+        case DXGI_FORMAT_BC3_UNORM:      *out_format = VK_FORMAT_BC3_UNORM_BLOCK;       return 1;
+        case DXGI_FORMAT_BC3_UNORM_SRGB: *out_format = VK_FORMAT_BC3_SRGB_BLOCK;        return 1;
+        case DXGI_FORMAT_BC4_UNORM:      *out_format = VK_FORMAT_BC4_UNORM_BLOCK;       return 1;
+        case DXGI_FORMAT_BC4_SNORM:      *out_format = VK_FORMAT_BC4_SNORM_BLOCK;       return 1;
+        case DXGI_FORMAT_BC5_UNORM:      *out_format = VK_FORMAT_BC5_UNORM_BLOCK;       return 1;
+        case DXGI_FORMAT_BC5_SNORM:      *out_format = VK_FORMAT_BC5_SNORM_BLOCK;       return 1;
+        default: return 0;
+    }
+}
+
+static int dds_fourcc_to_vk(uint32_t fourCC, VkFormat* out_format) {
+    switch (fourCC) {
+        case DDS_FOURCC('D','X','T','1'):
+            *out_format = VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+            return 1;
+        case DDS_FOURCC('D','X','T','3'):
+            *out_format = VK_FORMAT_BC2_UNORM_BLOCK;
+            return 1;
+        case DDS_FOURCC('D','X','T','5'):
+            *out_format = VK_FORMAT_BC3_UNORM_BLOCK;
+            return 1;
+        case DDS_FOURCC('A','T','I','1'):
+        case DDS_FOURCC('B','C','4','U'):
+            *out_format = VK_FORMAT_BC4_UNORM_BLOCK;
+            return 1;
+        case DDS_FOURCC('B','C','4','S'):
+            *out_format = VK_FORMAT_BC4_SNORM_BLOCK;
+            return 1;
+        case DDS_FOURCC('A','T','I','2'):
+        case DDS_FOURCC('B','C','5','U'):
+            *out_format = VK_FORMAT_BC5_UNORM_BLOCK;
+            return 1;
+        case DDS_FOURCC('B','C','5','S'):
+            *out_format = VK_FORMAT_BC5_SNORM_BLOCK;
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static int parse_dds_bc(const uint8_t* bytes, size_t len, DDSInfo* out_info) {
+    if (len < 4 + sizeof(DDS_HEADER)) {
+        printf("DDS: too small\n");
         return 0;
     }
 
-    struct KTX2Header header;
-    memcpy(&header, bytes, sizeof(header));
-
-    static const uint8_t magic[12] = { 0xAB, 'K','T','X',' ','2','0', 0xBB, 0x0D, 0x0A, 0x1A, 0x0A };
-    if (memcmp(header.identifier, magic, 12) != 0) {
-        printf("KTX2: invalid magic\n");
+    uint32_t magic;
+    memcpy(&magic, bytes, 4);
+    if (magic != DDS_MAGIC) {
+        printf("DDS: invalid magic\n");
         return 0;
     }
 
-    uint32_t levelCount;
-    levelCount = header.levelCount;
-    if (levelCount == 0) {
-        levelCount = 1;
-    }
+    DDS_HEADER hdr;
+    memcpy(&hdr, bytes + 4, sizeof(hdr));
 
-    size_t levelsBytes;
-    size_t levelsOffset;
-    levelsBytes = (size_t)levelCount * sizeof(struct KTX2LevelIndex);
-    levelsOffset = sizeof(struct KTX2Header);
-    if (len < levelsOffset + levelsBytes) {
-        printf("KTX2: too small for level index\n");
+    if (hdr.size != 124) {
+        printf("DDS: invalid header size: %u\n", hdr.size);
         return 0;
     }
 
-    memcpy(out_levels, bytes + levelsOffset, levelsBytes);
+    if (hdr.ddspf.size != 32) {
+        printf("DDS: invalid pixel format size: %u\n", hdr.ddspf.size);
+        return 0;
+    }
 
-    *out_hdr = header;
-    *out_level_count = levelCount;
+    VkFormat format = VK_FORMAT_UNDEFINED;
+    size_t dataOffset = 4 + sizeof(DDS_HEADER);
+
+    if ((hdr.ddspf.flags & DDPF_FOURCC) == 0) {
+        printf("DDS: expected compressed FourCC/DX10 format\n");
+        return 0;
+    }
+
+    if (hdr.ddspf.fourCC == DDS_FOURCC('D','X','1','0')) {
+        if (len < dataOffset + sizeof(DDS_HEADER_DXT10)) {
+            printf("DDS: too small for DX10 header\n");
+            return 0;
+        }
+
+        DDS_HEADER_DXT10 dx10;
+        memcpy(&dx10, bytes + dataOffset, sizeof(dx10));
+        dataOffset += sizeof(DDS_HEADER_DXT10);
+
+        if (dx10.arraySize != 1) {
+            printf("DDS: array textures not supported (arraySize=%u)\n", dx10.arraySize);
+            return 0;
+        }
+
+        if (!dds_dxgi_to_vk(dx10.dxgiFormat, &format)) {
+            printf("DDS: unsupported DXGI format: %u\n", dx10.dxgiFormat);
+            return 0;
+        }
+    } else {
+        if (!dds_fourcc_to_vk(hdr.ddspf.fourCC, &format)) {
+            printf("DDS: unsupported FourCC: 0x%08X\n", hdr.ddspf.fourCC);
+            return 0;
+        }
+    }
+
+    uint32_t mipLevels = 1;
+    if ((hdr.flags & DDSD_MIPMAPCOUNT) && hdr.mipMapCount > 0) {
+        mipLevels = hdr.mipMapCount;
+    }
+
+    if (hdr.width == 0 || hdr.height == 0) {
+        printf("DDS: invalid dimensions %ux%u\n", hdr.width, hdr.height);
+        return 0;
+    }
+
+    size_t expected = 0;
+    uint32_t w = hdr.width;
+    uint32_t h = hdr.height;
+    for (uint32_t i = 0; i < mipLevels; ++i) {
+        expected += bc_mip_size_bytes(format, w, h);
+        w = (w > 1) ? (w >> 1) : 1;
+        h = (h > 1) ? (h >> 1) : 1;
+    }
+
+    if (len < dataOffset + expected) {
+        printf("DDS: truncated data, expected at least %zu bytes after header, got %zu\n",
+               expected, len - dataOffset);
+        return 0;
+    }
+
+    out_info->format = format;
+    out_info->width = hdr.width;
+    out_info->height = hdr.height;
+    out_info->mipLevels = mipLevels;
+    out_info->data = bytes + dataOffset;
+    out_info->dataSize = expected;
     return 1;
 }
 
-static int create_texture_from_ktx2_astc(struct Machine* m, struct Swapchain* swapchain, const uint8_t* bytes, size_t len, Texture* out_tex) {
-    struct KTX2Header header;
-    struct KTX2LevelIndex levels[32];
-    uint32_t levelCount;
-    memset(levels, 0, sizeof(levels));
-    levelCount = 0;
+static int create_texture_from_dds_bc(
+    struct Machine* m,
+    VkCommandPool pool,
+    const uint8_t* bytes,
+    size_t len,
+    Texture* out_tex
+) {
+    DDSInfo dds;
+    memset(&dds, 0, sizeof(dds));
 
-    if (!parse_ktx2_header_and_levels(bytes, len, &header, levels, &levelCount)) {
-        printf("Failed to parse KTX2 header\n");
+    if (!parse_dds_bc(bytes, len, &dds)) {
+        printf("Failed to parse DDS\n");
         return 0;
     }
 
-    VkFormat format;
-    format = (VkFormat)header.vkFormat;
-    if (format != VK_FORMAT_ASTC_4x4_SRGB_BLOCK) {
-        printf("Unexpected vkFormat in KTX2: %u\n", header.vkFormat);
-    }
-
-    uint32_t w;
-    uint32_t h;
-    w = header.pixelWidth;
-    h = header.pixelHeight;
-
-    uint64_t first;
-    uint64_t last;
-    first = UINT64_MAX;
-    last = 0;
-
-    for (uint32_t i = 0; i < levelCount; ++i) {
-        if (levels[i].byteLength == 0) {
-            continue;
-        }
-        if (levels[i].byteOffset < first) {
-            first = levels[i].byteOffset;
-        }
-        uint64_t end;
-        end = levels[i].byteOffset + levels[i].byteLength;
-        if (end > last) {
-            last = end;
-        }
-    }
-
-    if (first == UINT64_MAX || last > (uint64_t)len) {
-        printf("Invalid KTX2 level data offsets\n");
+    if (!device_supports_bc(m->physical_device)) {
+        printf("Device does not support BC texture compression\n");
         return 0;
     }
 
-    VkDevice dev;
-    VkPhysicalDevice phys;
-    VkQueue queue;
-    VkCommandPool pool;
-    dev = m->device;
-    phys = m->physical_device;
-    queue = m->queue_graphics;
-    pool = swapchain->command_pool_graphics;
+    if (!format_supports_sampled_image(m->physical_device, dds.format)) {
+        printf("DDS: BC format not supported for sampling: %u\n", (uint32_t)dds.format);
+        return 0;
+    }
 
-    create_image_2d_mipped(dev, phys, w, h, format, levelCount, VK_IMAGE_USAGE_SAMPLED_BIT, &out_tex->image, &out_tex->memory);
+    VkDevice dev = m->device;
+    VkPhysicalDevice phys = m->physical_device;
+    VkQueue queue = m->queue_graphics;
 
-    VkDeviceSize pixelSize;
-    pixelSize = (VkDeviceSize)(last - first);
+    create_image_2d_mipped(
+        dev,
+        phys,
+        dds.width,
+        dds.height,
+        dds.format,
+        dds.mipLevels,
+        VK_IMAGE_USAGE_SAMPLED_BIT,
+        &out_tex->image,
+        &out_tex->memory
+    );
 
     VkBuffer staging;
     VkDeviceMemory staging_mem;
-    create_buffer_and_memory(dev, phys, pixelSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &staging, &staging_mem);
-    upload_to_buffer(dev, staging_mem, 0, bytes + first, (size_t)pixelSize);
+    create_buffer_and_memory(
+        dev,
+        phys,
+        (VkDeviceSize)dds.dataSize,
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        &staging,
+        &staging_mem
+    );
+    upload_to_buffer(dev, staging_mem, 0, dds.data, dds.dataSize);
 
-    VkCommandBuffer cmd;
-    cmd = begin_single_use_cmd(dev, pool);
+    VkCommandBuffer cmd = begin_single_use_cmd(dev, pool);
 
     VkImageMemoryBarrier2 to_copy;
     memset(&to_copy, 0, sizeof(to_copy));
@@ -302,7 +530,7 @@ static int create_texture_from_ktx2_astc(struct Machine* m, struct Swapchain* sw
     to_copy.image = out_tex->image;
     to_copy.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     to_copy.subresourceRange.baseMipLevel = 0;
-    to_copy.subresourceRange.levelCount = levelCount;
+    to_copy.subresourceRange.levelCount = dds.mipLevels;
     to_copy.subresourceRange.baseArrayLayer = 0;
     to_copy.subresourceRange.layerCount = 1;
 
@@ -314,29 +542,28 @@ static int create_texture_from_ktx2_astc(struct Machine* m, struct Swapchain* sw
     vkCmdPipelineBarrier2(cmd, &dep0);
 
     VkBufferImageCopy regions[32];
-    uint32_t regionCount;
+    uint32_t regionCount = 0;
     memset(regions, 0, sizeof(regions));
-    regionCount = 0;
 
-    for (uint32_t level = 0; level < levelCount; ++level) {
-        if (levels[level].byteLength == 0) {
-            continue;
-        }
+    size_t offset = 0;
+    uint32_t w = dds.width;
+    uint32_t h = dds.height;
 
-        uint32_t mipW;
-        uint32_t mipH;
-        mipW = w >> level;
-        mipH = h >> level;
-        if (mipW == 0) {
-            mipW = 1;
-        }
-        if (mipH == 0) {
-            mipH = 1;
-        }
+    if (dds.mipLevels > 32) {
+        printf("DDS: too many mip levels: %u\n", dds.mipLevels);
+        vkDestroyImage(dev, out_tex->image, NULL);
+        vkFreeMemory(dev, out_tex->memory, NULL);
+        out_tex->image = VK_NULL_HANDLE;
+        out_tex->memory = VK_NULL_HANDLE;
+        return 0;
+    }
+
+    for (uint32_t level = 0; level < dds.mipLevels; ++level) {
+        size_t mipSize = bc_mip_size_bytes(dds.format, w, h);
 
         VkBufferImageCopy r;
         memset(&r, 0, sizeof(r));
-        r.bufferOffset = (VkDeviceSize)(levels[level].byteOffset - first);
+        r.bufferOffset = (VkDeviceSize)offset;
         r.bufferRowLength = 0;
         r.bufferImageHeight = 0;
         r.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -346,29 +573,42 @@ static int create_texture_from_ktx2_astc(struct Machine* m, struct Swapchain* sw
         r.imageOffset.x = 0;
         r.imageOffset.y = 0;
         r.imageOffset.z = 0;
-        r.imageExtent.width = mipW;
-        r.imageExtent.height = mipH;
+        r.imageExtent.width = w;
+        r.imageExtent.height = h;
         r.imageExtent.depth = 1;
 
-        regions[regionCount] = r;
-        regionCount++;
+        regions[regionCount++] = r;
+
+        offset += mipSize;
+        w = (w > 1) ? (w >> 1) : 1;
+        h = (h > 1) ? (h >> 1) : 1;
     }
 
-    vkCmdCopyBufferToImage(cmd, staging, out_tex->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, regionCount, regions);
+    vkCmdCopyBufferToImage(
+        cmd,
+        staging,
+        out_tex->image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        regionCount,
+        regions
+    );
 
     VkImageMemoryBarrier2 to_shader;
     memset(&to_shader, 0, sizeof(to_shader));
     to_shader.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
     to_shader.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
     to_shader.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-    to_shader.dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    to_shader.dstStageMask =
+        VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
     to_shader.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
     to_shader.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     to_shader.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     to_shader.image = out_tex->image;
     to_shader.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     to_shader.subresourceRange.baseMipLevel = 0;
-    to_shader.subresourceRange.levelCount = levelCount;
+    to_shader.subresourceRange.levelCount = dds.mipLevels;
     to_shader.subresourceRange.baseArrayLayer = 0;
     to_shader.subresourceRange.layerCount = 1;
 
@@ -384,22 +624,49 @@ static int create_texture_from_ktx2_astc(struct Machine* m, struct Swapchain* sw
     vkDestroyBuffer(dev, staging, NULL);
     vkFreeMemory(dev, staging_mem, NULL);
 
-    create_view_2d_mipped(dev, out_tex->image, format, levelCount, &out_tex->view);
+    create_view_2d_mipped(dev, out_tex->image, dds.format, dds.mipLevels, &out_tex->view);
 
     return 1;
 }
 
-static void create_dummy_texture(struct Machine* machine, struct Swapchain* swapchain) {
-    uint32_t pixel;
-    pixel = 0xFFFFFFFFu;
+/* ---------- existing dummy / descriptor code ---------- */
+
+static void create_dummy_texture(struct Machine* machine, VkCommandPool pool) {
+    uint32_t pixel = 0xFFFFFFFFu;
 
     dummy_texture.image = VK_NULL_HANDLE;
     dummy_texture.memory = VK_NULL_HANDLE;
     dummy_texture.view = VK_NULL_HANDLE;
 
-    create_image_2d_mipped(machine->device, machine->physical_device, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, 1, VK_IMAGE_USAGE_SAMPLED_BIT, &dummy_texture.image, &dummy_texture.memory);
-    upload_image_2d(machine->device, machine->physical_device, machine->queue_graphics, swapchain->command_pool_graphics, dummy_texture.image, 1, 1, &pixel, sizeof(pixel));
-    create_view_2d_mipped(machine->device, dummy_texture.image, VK_FORMAT_R8G8B8A8_UNORM, 1, &dummy_texture.view);
+    create_image_2d_mipped(
+        machine->device,
+        machine->physical_device,
+        1,
+        1,
+        VK_FORMAT_R8G8B8A8_UNORM,
+        1,
+        VK_IMAGE_USAGE_SAMPLED_BIT,
+        &dummy_texture.image,
+        &dummy_texture.memory
+    );
+    upload_image_2d(
+        machine->device,
+        machine->physical_device,
+        machine->queue_graphics,
+        pool,
+        dummy_texture.image,
+        1,
+        1,
+        &pixel,
+        sizeof(pixel)
+    );
+    create_view_2d_mipped(
+        machine->device,
+        dummy_texture.image,
+        VK_FORMAT_R8G8B8A8_UNORM,
+        1,
+        &dummy_texture.view
+    );
 
     for (uint32_t i = 0; i < MAX_TEXTURES; ++i) {
         textures[i] = dummy_texture;
@@ -414,7 +681,7 @@ static void create_dummy_texture(struct Machine* machine, struct Swapchain* swap
     texture_count = 0;
 }
 
-static void create_textures(struct Machine* machine, struct Swapchain* swapchain) {
+static void create_textures(struct Machine* machine, VkCommandPool pool) {
     VkSamplerCreateInfo sci;
     memset(&sci, 0, sizeof(sci));
     sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -427,42 +694,42 @@ static void create_textures(struct Machine* machine, struct Swapchain* swapchain
     sci.maxLod = 3.40282346638528859811704183484516925e+38F;
     VK_CHECK(vkCreateSampler(machine->device, &sci, NULL, &global_sampler));
 
-    create_dummy_texture(machine, swapchain);
+    create_dummy_texture(machine, pool);
 
-    if (create_texture_from_ktx2_astc(machine, swapchain, font_atlas, font_atlas_len, &textures[texture_count])) {
+    if (create_texture_from_dds_bc(machine, pool, font_atlas, font_atlas_len, &textures[texture_count])) {
         texture_count++;
     } else {
-        printf("Failed to create font atlas texture from KTX2\n");
+        printf("Failed to create font atlas texture from DDS/BC\n");
     }
 
-    if (create_texture_from_ktx2_astc(machine, swapchain, map, map_len, &textures[texture_count])) {
+    if (create_texture_from_dds_bc(machine, pool, map, map_len, &textures[texture_count])) {
         texture_count++;
     } else {
-        printf("Failed to create map texture from KTX2\n");
+        printf("Failed to create map texture from DDS/BC\n");
     }
 
-    if (create_texture_from_ktx2_astc(machine, swapchain, height, height_len, &textures[texture_count])) {
+    if (create_texture_from_dds_bc(machine, pool, height, height_len, &textures[texture_count])) {
         texture_count++;
     } else {
-        printf("Failed to create height texture from KTX2\n");
+        printf("Failed to create height texture from DDS/BC\n");
     }
 
-    if (create_texture_from_ktx2_astc(machine, swapchain, normals, normals_len, &textures[texture_count])) {
+    if (create_texture_from_dds_bc(machine, pool, normals, normals_len, &textures[texture_count])) {
         texture_count++;
     } else {
-        printf("Failed to create normals texture from KTX2\n");
+        printf("Failed to create normals texture from DDS/BC\n");
     }
 
-    if (create_texture_from_ktx2_astc(machine, swapchain, noise, noise_len, &textures[texture_count])) {
+    if (create_texture_from_dds_bc(machine, pool, noise, noise_len, &textures[texture_count])) {
         texture_count++;
     } else {
-        printf("Failed to create noise texture from KTX2\n");
+        printf("Failed to create noise texture from DDS/BC\n");
     }
 
-    if (create_texture_from_ktx2_astc(machine, swapchain, height_detail, height_detail_len, &textures[texture_count])) {
+    if (create_texture_from_dds_bc(machine, pool, height_detail, height_detail_len, &textures[texture_count])) {
         texture_count++;
     } else {
-        printf("Failed to create height detail texture from KTX2\n");
+        printf("Failed to create height detail texture from DDS/BC\n");
     }
 
     if (texture_count == 0) {
@@ -473,7 +740,7 @@ static void create_textures(struct Machine* machine, struct Swapchain* swapchain
 static void fill_texture_descriptor_infos(VkDescriptorImageInfo* out_infos, uint32_t count) {
     for (uint32_t i = 0; i < count; ++i) {
         VkImageView view = textures[i].view;
-        if (view == VK_NULL_HANDLE) view = dummy_texture.view; // hard safety
+        if (view == VK_NULL_HANDLE) view = dummy_texture.view;
         out_infos[i].sampler = global_sampler;
         out_infos[i].imageView = view;
         out_infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -489,9 +756,10 @@ static void fill_detail_texture_descriptor_infos(VkDescriptorImageInfo* out_info
         out_infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
 }
+
 static int create_texture_from_r8(
     struct Machine* m,
-    struct Swapchain* swapchain,
+    VkCommandPool pool,
     const uint8_t* pixels,
     uint32_t w,
     uint32_t h,
@@ -500,7 +768,6 @@ static int create_texture_from_r8(
     VkDevice dev = m->device;
     VkPhysicalDevice phys = m->physical_device;
     VkQueue queue = m->queue_graphics;
-    VkCommandPool pool = swapchain->command_pool_graphics;
 
     if (out_tex->image == VK_NULL_HANDLE) {
         create_image_2d_mipped(
@@ -541,14 +808,14 @@ static int create_texture_from_r8(
 
 static int upload_detail_texture_pair(
     struct Machine* machine,
-    struct Swapchain* swapchain,
+    VkCommandPool pool,
     const uint8_t* terrain_pixels,
     const uint8_t* height_pixels,
     uint32_t w,
     uint32_t h
 ) {
     if (!create_texture_from_r8(
-            machine, swapchain,
+            machine, pool,
             terrain_pixels, w, h,
             &detail_textures[DETAIL_TEXTURE_TERRAIN])) {
         printf("Failed to upload terrain detail texture\n");
@@ -556,7 +823,7 @@ static int upload_detail_texture_pair(
     }
 
     if (!create_texture_from_r8(
-            machine, swapchain,
+            machine, pool,
             height_pixels, w, h,
             &detail_textures[DETAIL_TEXTURE_HEIGHT])) {
         printf("Failed to upload height detail texture\n");

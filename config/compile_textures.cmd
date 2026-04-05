@@ -27,20 +27,26 @@ for %%F in (data\*.png) do (
 )
 goto :eof
 
-:build_ktx
+:build_bc
+set "fmt=BC1_UNORM"
+if /I "%~2"=="font_atlas" set "fmt=BC3_UNORM"
+if /I "%~2"=="height" set "fmt=BC4_UNORM"
+if /I "%~2"=="noise" set "fmt=BC4_UNORM"
+if /I "%~2"=="height_detail" set "fmt=BC4_UNORM"
+if /I "%~2"=="normals" set "fmt=BC5_UNORM"
+
 echo Building compressed %~1
-toktx --t2 --encode astc --astc_blk_d 4x4 --srgb --genmipmap ^
-    "static/win32/%~2.ktx2" "%~1"
+texconv -y -m 0 -f %fmt% -o static\win32 "%~1"
 if errorlevel 1 exit /b 1
 
 objcopy -I binary -O elf64-x86-64 ^
     --rename-section .data=.rdata,alloc,load,readonly,data,contents ^
-    "static/win32/%~2.ktx2" "static/win32/%~2.obj" ^
-    --redefine-sym _binary_static_win32_%~2_ktx2_start=%~2 ^
-    --redefine-sym _binary_static_win32_%~2_ktx2_end=%~2_end
+    "static/win32/%~2.dds" "static/win32/%~2.obj" ^
+    --redefine-sym _binary_static_win32_%~2_dds_start=%~2 ^
+    --redefine-sym _binary_static_win32_%~2_dds_end=%~2_end
 if errorlevel 1 exit /b 1
 
-del "static\win32\%~2.ktx2"
+del "static\win32\%~2.dds"
 exit /b 0
 
 :build_raw
@@ -71,7 +77,7 @@ for img in data/*.png; do
             kind=raw
             ;;
         *)
-            kind=ktx
+            kind=bc
             ;;
     esac
 
@@ -81,7 +87,7 @@ for img in data/*.png; do
         if [ "$kind" = raw ]; then
             raw="static/linux/${base}.raw"
 
-            magick "$img" -channel R -separate -depth 8 "gray:${raw}"
+            magick "$img" -channel R -separate -depth 8 "gray:${raw}" || exit 1
 
             objcopy \
                 -I binary -O default \
@@ -93,20 +99,36 @@ for img in data/*.png; do
 
             rm "$raw"
         else
-            ktx="static/linux/${base}.ktx2"
+            dds="static/linux/${base}.dds"
 
-            toktx --t2 --encode astc --astc_blk_d 4x4 --srgb --genmipmap \
-                "$ktx" "$img" || exit 1
+            case "$base" in
+                font_atlas)
+                    fmt=BC3
+                    ;;
+                height|noise)
+                    fmt=BC4
+                    ;;
+                normals,height_detail)
+                    fmt=BC5
+                    ;;
+                *)
+                    fmt=BC1
+                    ;;
+            esac
+
+            CompressonatorCLI \
+                -fd "$fmt" \
+                "$img" "$dds" || exit 1
 
             objcopy \
                 -I binary -O default \
                 --rename-section .data=.rodata,alloc,load,readonly,data,contents \
-                "$ktx" "$out" \
-                --redefine-sym "_binary_static_linux_${base}_ktx2_start=${base}" \
-                --redefine-sym "_binary_static_linux_${base}_ktx2_end=${base}_end" \
+                "$dds" "$out" \
+                --redefine-sym "_binary_static_linux_${base}_dds_start=${base}" \
+                --redefine-sym "_binary_static_linux_${base}_dds_end=${base}_end" \
                 || exit 1
 
-            rm "$ktx"
+            rm "$dds"
         fi
     else
         echo "Skipping $img (up to date)"

@@ -7,8 +7,8 @@
 #define DEBUG_CPU 1
 
 // VULKAN
-#include "shaders.h"
-#define USE_DISCRETE_GPU 0
+#include "shaders.c"
+#define USE_DISCRETE_GPU 1
 #define ENABLE_HDR 0
 
 // LIBC

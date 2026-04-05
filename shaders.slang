@@ -1,4 +1,4 @@
-#include "shaders.h"
+#include "shaders.c"
 
 // functional data
 [[vk::binding(17,0)]] RWStructuredBuffer<unit> UNITS;    // size is # of chunks

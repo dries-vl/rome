@@ -1,23 +1,31 @@
 #pragma once
 
+#if DEBUG_APP == 1
+    enum {
+        Q_BEGIN = 0, // start of frame (already have)
+        Q_CHUNKS, // after vkCmdFillBuffer
+        Q_OBJECTS, // after compute build visible
+        Q_PREPARE, // after prepare indirect
+        Q_SCATTER, // after compute->graphics barrier
+        Q_BUCKETS, // just before vkCmdBeginRenderPass
+        Q_RENDER, // just after vkCmdEndRenderPass
+        Q_BLIT, // after vkCmdBlitImage2 + transition to PRESENT
+        Q_END, // end of cmdbuf (already have)
+        QUERIES_PER_IMAGE // nr of queries
+    };
+#endif
+
 struct Swapchain {
     // swapchain
     VkSwapchainKHR            swapchain;
-    VkFormat                  swapchain_format;
-    VkColorSpaceKHR           swapchain_colorspace;
     VkExtent2D                swapchain_extent;
     uint32_t                  swapchain_image_count;
     // for each image in the swapchain
     VkImage                   swapchain_images[MAX_SWAPCHAIN_IMAGES];
     VkImageView               swapchain_views[MAX_SWAPCHAIN_IMAGES];
     VkImageLayout             image_layouts[MAX_SWAPCHAIN_IMAGES];
-    VkCommandPool             command_pool_graphics;
-    VkCommandBuffer           command_buffers_per_image[MAX_SWAPCHAIN_IMAGES];
-    int                       command_buffers_recorded[MAX_SWAPCHAIN_IMAGES];
     VkSemaphore               present_ready_per_image[MAX_SWAPCHAIN_IMAGES];
     VkFramebuffer             framebuffers[MAX_SWAPCHAIN_IMAGES];
-    // remember which swapchain image the previous frame used
-    uint32_t                  previous_frame_image_index[MAX_FRAMES_IN_FLIGHT];
     // depth
     VkFormat                  depth_format;
     VkImage                   depth_image;
@@ -27,45 +35,22 @@ struct Swapchain {
     VkImage         pick_image;
     VkDeviceMemory  pick_image_memory;
     VkImageView     pick_image_view;
-    // readback from gpu
-    VkBuffer        pick_readback_buffer;
-    VkDeviceMemory  pick_readback_memory;
-    VkBuffer        pick_region_buffer;
-    VkDeviceMemory  pick_region_memory;
-    VkBuffer        depth_readback_buffer;
-    VkDeviceMemory  depth_readback_memory;
     // debug
     #if DEBUG_APP == 1
     VkQueryPool query_pool; // GPU timestamps
     #endif
 };
 
-struct Swapchain create_swapchain(const struct Machine *machine) {
+struct Swapchain create_swapchain(const struct Machine *machine, VkFormat format, VkColorSpaceKHR colorspace) {
     struct Swapchain swapchain = {0};
 
     // Surface capabilities and formats
     VkSurfaceCapabilitiesKHR capabilities;
     VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(machine->physical_device, machine->surface, &capabilities));
 
-    uint32_t format_count = 0;
-    vkGetPhysicalDeviceSurfaceFormatsKHR(machine->physical_device, machine->surface, &format_count, NULL);
-    VkSurfaceFormatKHR formats[32];
-    if (format_count > 32) format_count = 32;
-    vkGetPhysicalDeviceSurfaceFormatsKHR(machine->physical_device, machine->surface, &format_count, formats);
-
-    VkSurfaceFormatKHR chosen_format = formats[0];
-    for (uint32_t i = 0; i < format_count; ++i) {
-        if (ENABLE_HDR) {
-            if (formats[i].format == VK_FORMAT_R16G16B16A16_SFLOAT) { chosen_format = formats[i]; break; }
-        } else {
-            if (formats[i].format == VK_FORMAT_B8G8R8A8_SRGB) { chosen_format = formats[i]; break; }
-        }
-    }
-    swapchain.swapchain_format     = chosen_format.format;
-    swapchain.swapchain_colorspace = chosen_format.colorSpace;
-
     VkExtent2D desired_extent = capabilities.currentExtent;
     if (desired_extent.width == UINT32_MAX) {
+        // we can essentially just pick the size on wayland
         desired_extent.width  = pf_window_width();
         desired_extent.height = pf_window_height();
     }
@@ -79,8 +64,8 @@ struct Swapchain create_swapchain(const struct Machine *machine) {
         .sType            = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
         .surface          = machine->surface,
         .minImageCount    = min_image_count,
-        .imageFormat      = swapchain.swapchain_format,
-        .imageColorSpace  = swapchain.swapchain_colorspace,
+        .imageFormat      = format,
+        .imageColorSpace  = colorspace,
         .imageExtent      = swapchain.swapchain_extent,
         .imageArrayLayers = 1,
         .imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
@@ -114,7 +99,7 @@ struct Swapchain create_swapchain(const struct Machine *machine) {
             .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
             .image = swapchain.swapchain_images[i],
             .viewType = VK_IMAGE_VIEW_TYPE_2D,
-            .format = swapchain.swapchain_format,
+            .format = format,
             .components = {
                 VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
                 VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY
@@ -123,33 +108,12 @@ struct Swapchain create_swapchain(const struct Machine *machine) {
         };
         VK_CHECK(vkCreateImageView(machine->device, &view_info, NULL, &swapchain.swapchain_views[i]));
     }
-    #if DEBUG_APP == 1
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i)
-        swapchain.previous_frame_image_index[i] = UINT32_MAX;
-    #endif
 
     // create per-image present semaphores
     VkSemaphoreCreateInfo si = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
     for (uint32_t i = 0; i < swapchain.swapchain_image_count; ++i) {
         VK_CHECK(vkCreateSemaphore(machine->device, &si, NULL, &swapchain.present_ready_per_image[i]));
     }
-
-    // create command pool
-    VkCommandPoolCreateInfo cmd_pool_info = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-        .queueFamilyIndex = machine->queue_family_graphics,
-        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
-    };
-    VK_CHECK(vkCreateCommandPool(machine->device, &cmd_pool_info, NULL, &swapchain.command_pool_graphics));
-
-    // create per-image command buffers (needs the command pool)
-    VkCommandBufferAllocateInfo cmd_alloc_info = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .commandPool = swapchain.command_pool_graphics,
-        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = swapchain.swapchain_image_count
-    };
-    VK_CHECK(vkAllocateCommandBuffers(machine->device, &cmd_alloc_info, swapchain.command_buffers_per_image));
 
     #if DEBUG_APP == 1
     VkQueryPoolCreateInfo qpci = {
@@ -269,25 +233,16 @@ struct Swapchain create_swapchain(const struct Machine *machine) {
     };
     VK_CHECK(vkCreateImageView(machine->device, &view, NULL, &swapchain.pick_image_view));
 
+    pf_timestamp("Swapchain created");
     return swapchain;
 }
 
-void destroy_swapchain(struct Machine* machine, struct Renderer* renderer, struct Swapchain* swapchain) {
+void destroy_swapchain(struct Machine* machine, struct Swapchain* swapchain) {
     // Present semaphores depend on image count — free them here
     if (swapchain->present_ready_per_image) {
         for (uint32_t i = 0; i < swapchain->swapchain_image_count; ++i)
             vkDestroySemaphore(machine->device, swapchain->present_ready_per_image[i], NULL);
         memset(swapchain->present_ready_per_image, 0, sizeof swapchain->present_ready_per_image);
-    }
-    // Command buffers depend on image count — free them here
-    if (swapchain->command_buffers_per_image) {
-        vkFreeCommandBuffers(machine->device, swapchain->command_pool_graphics, swapchain->swapchain_image_count, swapchain->command_buffers_per_image);
-        memset(swapchain->command_buffers_per_image, 0, sizeof swapchain->command_buffers_per_image);
-    }
-    // Destroy the command pool itself
-    if (swapchain->command_pool_graphics) {
-        vkDestroyCommandPool(machine->device, swapchain->command_pool_graphics, NULL);
-        swapchain->command_pool_graphics = VK_NULL_HANDLE;
     }
     #if DEBUG_APP == 1
     if (swapchain->query_pool) {
@@ -317,9 +272,9 @@ void destroy_swapchain(struct Machine* machine, struct Renderer* renderer, struc
     swapchain->swapchain_image_count = 0;
 }
 
-static void recreate_swapchain(struct Machine* machine, struct Renderer* renderer,struct Swapchain* swapchain) {
+static void recreate_swapchain(struct Machine* machine, struct Swapchain* swapchain, VkFormat format, VkColorSpaceKHR colorspace) {
     // Wait for GPU to finish anything that might use old swapchain resources
     vkDeviceWaitIdle(machine->device);
-    destroy_swapchain(machine, renderer, swapchain);
-    *swapchain = create_swapchain(machine);
+    destroy_swapchain(machine, swapchain);
+    *swapchain = create_swapchain(machine, format, colorspace);
 }
