@@ -2,17 +2,17 @@
 
 // SETTINGS
 #define APP_NAME "Rome"
-#define DEBUG_VULKAN 1
+#define DEBUG_VULKAN 0
 #define DEBUG_APP 1
-#define DEBUG_CPU 1
+#define DEBUG_CPU 0
 
 // VULKAN
 #include "shaders.c"
-#define USE_DISCRETE_GPU 1
+#define USE_DISCRETE_GPU 0
 #define ENABLE_HDR 0
 
 // LIBC
-extern void _exit(int);
+extern void exit(int);
 extern int printf(const char*,...); // todo: just don't use
 extern int snprintf(char*,__SIZE_TYPE__,const char*,...); // todo: just don't use
 extern void *memcpy(void *__restrict,const void*__restrict,__SIZE_TYPE__);

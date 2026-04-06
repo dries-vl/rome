@@ -31,3 +31,12 @@ void *pf_display_or_instance();
 int pf_window_visible();
 int pf_poll_events();
 void pf_create_window(char*,void*,KEYBOARD_CB,MOUSE_CB);
+void pf_destroy_window();
+
+#define USE_DRM_KMS 1
+#if USE_DRM_KMS == 1
+int pf_drm_fd(void);
+unsigned int pf_drm_connector_id(void);
+unsigned int pf_drm_crtc_id(void);
+const void* pf_drm_mode(void);
+#endif

@@ -1,5 +1,22 @@
 #pragma once
 
+struct CommonTargets {
+    VkExtent2D extent;
+    // DEPTH
+    VkFormat depth_format;
+    VkImage depth_image;
+    VkDeviceMemory depth_memory;
+    VkImageView depth_view;
+    // OBJECT IDS
+    VkImage pick_image;
+    VkDeviceMemory pick_image_memory;
+    VkImageView pick_image_view;
+#if DEBUG_APP == 1
+    VkQueryPool query_pool;
+#endif
+};
+
+
 #if DEBUG_APP == 1
     enum {
         Q_BEGIN = 0, // start of frame (already have)
@@ -15,6 +32,147 @@
     };
 #endif
 
+struct CommonTargets create_targets(struct Machine *machine) {
+    struct CommonTargets targets;
+
+    // EXTENT
+#if defined(__linux__) && USE_DRM_KMS == 1
+    targets.extent.width  = (uint32_t)pf_window_width();
+    targets.extent.height = (uint32_t)pf_window_height();
+#else
+    VkSurfaceCapabilitiesKHR capabilities;
+    VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+        machine->physical_device,
+        machine->surface,
+        &capabilities));
+
+    VkExtent2D desired_extent = capabilities.currentExtent;
+    if (desired_extent.width == UINT32_MAX) {
+        desired_extent.width  = pf_window_width();
+        desired_extent.height = pf_window_height();
+    }
+    targets.extent = desired_extent;
+#endif
+
+    // DEPTH
+    const VkFormat candidates[] = {
+        VK_FORMAT_D32_SFLOAT,
+        VK_FORMAT_X8_D24_UNORM_PACK32,  // optional on some platforms
+        VK_FORMAT_D16_UNORM
+    };
+    for (uint32_t i = 0; i < sizeof(candidates)/sizeof(candidates[0]); ++i) {
+        VkFormatProperties p; vkGetPhysicalDeviceFormatProperties(machine->physical_device, candidates[i], &p);
+        if (p.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) {
+            targets.depth_format = candidates[i];
+            break;
+        }
+    }
+    if (!targets.depth_format) targets.depth_format = VK_FORMAT_D16_UNORM;
+    VkImageCreateInfo ici = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format    = targets.depth_format,
+        .extent    = { targets.extent.width, targets.extent.height, 1 },
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples   = VK_SAMPLE_COUNT_1_BIT,
+        .tiling    = VK_IMAGE_TILING_OPTIMAL,
+        .usage     = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
+    };
+    VK_CHECK(vkCreateImage(machine->device, &ici, NULL, &targets.depth_image));
+    VkMemoryRequirements req;
+    vkGetImageMemoryRequirements(machine->device, targets.depth_image, &req);
+    VkMemoryAllocateInfo mai = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize  = req.size,
+        .memoryTypeIndex = find_memory_type_index(machine->physical_device, req.memoryTypeBits,
+                                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+    };
+    VK_CHECK(vkAllocateMemory(machine->device, &mai, NULL, &targets.depth_memory));
+    VK_CHECK(vkBindImageMemory(machine->device, targets.depth_image, targets.depth_memory, 0));
+    VkImageViewCreateInfo ivci = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = targets.depth_image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = targets.depth_format,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+            .baseMipLevel = 0, .levelCount = 1,
+            .baseArrayLayer = 0, .layerCount = 1
+        }
+    };
+    VK_CHECK(vkCreateImageView(machine->device, &ivci, NULL, &targets.depth_view));
+
+    // OBJECT IDS
+    VkImageCreateInfo img = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .extent = {
+            .width  = targets.extent.width,
+            .height = targets.extent.height,
+            .depth  = 1
+        },
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .format = VK_FORMAT_R32_UINT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                 VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+
+    VK_CHECK(vkCreateImage(machine->device, &img, NULL, &targets.pick_image));
+
+    VkMemoryRequirements memReq;
+    vkGetImageMemoryRequirements(machine->device, targets.pick_image, &memReq);
+
+    VkMemoryAllocateInfo alloc = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = memReq.size,
+        .memoryTypeIndex = find_memory_type_index(
+            machine->physical_device,
+            memReq.memoryTypeBits,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+        )
+    };
+    VK_CHECK(vkAllocateMemory(machine->device, &alloc, NULL, &targets.pick_image_memory));
+    VK_CHECK(vkBindImageMemory(machine->device, targets.pick_image, targets.pick_image_memory, 0));
+
+    VkImageViewCreateInfo view = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = targets.pick_image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = VK_FORMAT_R32_UINT,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1
+        }
+    };
+    VK_CHECK(vkCreateImageView(machine->device, &view, NULL, &targets.pick_image_view));
+
+#if DEBUG_APP == 1
+    // QUERY POOL
+    VkQueryPoolCreateInfo qpci = {
+        .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+        .queryType = VK_QUERY_TYPE_TIMESTAMP,
+        .queryCount = MAX_SWAPCHAIN_IMAGES * QUERIES_PER_IMAGE
+    };
+    VK_CHECK(vkCreateQueryPool(machine->device, &qpci, NULL, &targets.query_pool));
+    uint32_t total_queries = MAX_SWAPCHAIN_IMAGES * QUERIES_PER_IMAGE;
+    vkResetQueryPool(machine->device, targets.query_pool, 0, total_queries);
+#endif
+
+    return targets;
+}
+
+#if USE_DRM_KMS == 0
 struct Swapchain {
     // swapchain
     VkSwapchainKHR            swapchain;
@@ -26,19 +184,6 @@ struct Swapchain {
     VkImageLayout             image_layouts[MAX_SWAPCHAIN_IMAGES];
     VkSemaphore               present_ready_per_image[MAX_SWAPCHAIN_IMAGES];
     VkFramebuffer             framebuffers[MAX_SWAPCHAIN_IMAGES];
-    // depth
-    VkFormat                  depth_format;
-    VkImage                   depth_image;
-    VkDeviceMemory            depth_memory;
-    VkImageView               depth_view;
-    // pick object ids
-    VkImage         pick_image;
-    VkDeviceMemory  pick_image_memory;
-    VkImageView     pick_image_view;
-    // debug
-    #if DEBUG_APP == 1
-    VkQueryPool query_pool; // GPU timestamps
-    #endif
 };
 
 struct Swapchain create_swapchain(const struct Machine *machine, VkFormat format, VkColorSpaceKHR colorspace) {
@@ -71,7 +216,11 @@ struct Swapchain create_swapchain(const struct Machine *machine, VkFormat format
         .imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
         .preTransform     = capabilities.currentTransform,
         .compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+#if defined(_WIN32)
         .presentMode      = VK_PRESENT_MODE_IMMEDIATE_KHR,
+#else
+        .presentMode      = VK_PRESENT_MODE_MAILBOX_KHR,
+#endif
         .clipped          = VK_TRUE
     };
 
@@ -87,7 +236,7 @@ struct Swapchain create_swapchain(const struct Machine *machine, VkFormat format
     VK_CHECK(vkCreateSwapchainKHR(machine->device, &swapchain_info, NULL, &swapchain.swapchain));
 
     VK_CHECK(vkGetSwapchainImagesKHR(machine->device, swapchain.swapchain, &min_image_count, NULL));
-    if(min_image_count > MAX_SWAPCHAIN_IMAGES) {printf("Too many swapchain images; can handle %d but got %d\n", MAX_SWAPCHAIN_IMAGES, min_image_count); _exit(0);};
+    if(min_image_count > MAX_SWAPCHAIN_IMAGES) {printf("Too many swapchain images; can handle %d but got %d\n", MAX_SWAPCHAIN_IMAGES, min_image_count); exit(0);};
     swapchain.swapchain_image_count = min_image_count;
     VK_CHECK(vkGetSwapchainImagesKHR(machine->device, swapchain.swapchain, &min_image_count, swapchain.swapchain_images));
     for (uint32_t i = 0; i < min_image_count; ++i) {
@@ -115,124 +264,7 @@ struct Swapchain create_swapchain(const struct Machine *machine, VkFormat format
         VK_CHECK(vkCreateSemaphore(machine->device, &si, NULL, &swapchain.present_ready_per_image[i]));
     }
 
-    #if DEBUG_APP == 1
-    VkQueryPoolCreateInfo qpci = {
-        .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
-        .queryType = VK_QUERY_TYPE_TIMESTAMP,
-        .queryCount = swapchain.swapchain_image_count * QUERIES_PER_IMAGE
-    };
-    VK_CHECK(vkCreateQueryPool(machine->device, &qpci, NULL, &swapchain.query_pool));
-    uint32_t total_queries = swapchain.swapchain_image_count * QUERIES_PER_IMAGE;
-    vkResetQueryPool(machine->device, swapchain.query_pool, 0, total_queries);
-    #endif
-    
-    // depth
-    const VkFormat candidates[] = {
-        VK_FORMAT_D32_SFLOAT,
-        VK_FORMAT_X8_D24_UNORM_PACK32,  // optional on some platforms
-        VK_FORMAT_D16_UNORM
-    };
-    for (uint32_t i = 0; i < sizeof(candidates)/sizeof(candidates[0]); ++i) {
-        VkFormatProperties p; vkGetPhysicalDeviceFormatProperties(machine->physical_device, candidates[i], &p);
-        if (p.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) {
-            swapchain.depth_format = candidates[i];
-            break;
-        }
-    }
-    // Fallback — should not happen on conformant HW
-    if (!swapchain.depth_format) swapchain.depth_format = VK_FORMAT_D16_UNORM;
-
-    VkImageCreateInfo ici = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-        .imageType = VK_IMAGE_TYPE_2D,
-        .format    = swapchain.depth_format,
-        .extent    = { swapchain.swapchain_extent.width, swapchain.swapchain_extent.height, 1 },
-        .mipLevels = 1,
-        .arrayLayers = 1,
-        .samples   = VK_SAMPLE_COUNT_1_BIT,
-        .tiling    = VK_IMAGE_TILING_OPTIMAL,
-        .usage     = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
-    };
-    VK_CHECK(vkCreateImage(machine->device, &ici, NULL, &swapchain.depth_image));
-
-    VkMemoryRequirements req;
-    vkGetImageMemoryRequirements(machine->device, swapchain.depth_image, &req);
-    VkMemoryAllocateInfo mai = {
-        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .allocationSize  = req.size,
-        .memoryTypeIndex = find_memory_type_index(machine->physical_device, req.memoryTypeBits,
-                                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-    };
-    VK_CHECK(vkAllocateMemory(machine->device, &mai, NULL, &swapchain.depth_memory));
-    VK_CHECK(vkBindImageMemory(machine->device, swapchain.depth_image, swapchain.depth_memory, 0));
-
-    VkImageViewCreateInfo ivci = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .image = swapchain.depth_image,
-        .viewType = VK_IMAGE_VIEW_TYPE_2D,
-        .format = swapchain.depth_format,
-        .subresourceRange = {
-            .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-            .baseMipLevel = 0, .levelCount = 1,
-            .baseArrayLayer = 0, .layerCount = 1
-        }
-    };
-    VK_CHECK(vkCreateImageView(machine->device, &ivci, NULL, &swapchain.depth_view));
-    
-    // create object pick image
-    VkImageCreateInfo img = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-        .imageType = VK_IMAGE_TYPE_2D,
-        .extent = {
-            .width  = swapchain.swapchain_extent.width,
-            .height = swapchain.swapchain_extent.height,
-            .depth  = 1
-        },
-        .mipLevels = 1,
-        .arrayLayers = 1,
-        .format = VK_FORMAT_R32_UINT,
-        .tiling = VK_IMAGE_TILING_OPTIMAL,
-        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-        .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                 VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-        .samples = VK_SAMPLE_COUNT_1_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-    };
-
-    VK_CHECK(vkCreateImage(machine->device, &img, NULL, &swapchain.pick_image));
-
-    VkMemoryRequirements memReq;
-    vkGetImageMemoryRequirements(machine->device, swapchain.pick_image, &memReq);
-
-    VkMemoryAllocateInfo alloc = {
-        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .allocationSize = memReq.size,
-        .memoryTypeIndex = find_memory_type_index(
-            machine->physical_device,
-            memReq.memoryTypeBits,
-            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
-        )
-    };
-    VK_CHECK(vkAllocateMemory(machine->device, &alloc, NULL, &swapchain.pick_image_memory));
-    VK_CHECK(vkBindImageMemory(machine->device, swapchain.pick_image, swapchain.pick_image_memory, 0));
-
-    VkImageViewCreateInfo view = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .image = swapchain.pick_image,
-        .viewType = VK_IMAGE_VIEW_TYPE_2D,
-        .format = VK_FORMAT_R32_UINT,
-        .subresourceRange = {
-            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-            .baseMipLevel = 0,
-            .levelCount = 1,
-            .baseArrayLayer = 0,
-            .layerCount = 1
-        }
-    };
-    VK_CHECK(vkCreateImageView(machine->device, &view, NULL, &swapchain.pick_image_view));
-
+    printf("swapchain has %d images\n", swapchain.swapchain_image_count);
     pf_timestamp("Swapchain created");
     return swapchain;
 }
@@ -244,12 +276,6 @@ void destroy_swapchain(struct Machine* machine, struct Swapchain* swapchain) {
             vkDestroySemaphore(machine->device, swapchain->present_ready_per_image[i], NULL);
         memset(swapchain->present_ready_per_image, 0, sizeof swapchain->present_ready_per_image);
     }
-    #if DEBUG_APP == 1
-    if (swapchain->query_pool) {
-        vkDestroyQueryPool(machine->device, swapchain->query_pool, NULL);
-        swapchain->query_pool = VK_NULL_HANDLE;
-    }
-    #endif
     if (swapchain->image_layouts) { memset(swapchain->image_layouts, 0, sizeof swapchain->image_layouts); }
     if (swapchain->swapchain_views) {
         for (uint32_t i = 0; i < swapchain->swapchain_image_count; ++i)
@@ -260,10 +286,6 @@ void destroy_swapchain(struct Machine* machine, struct Swapchain* swapchain) {
     if (swapchain->swapchain_images) {
         memset(swapchain->swapchain_images, 0, sizeof swapchain->swapchain_images);
     }
-    // depth
-    if (swapchain->depth_view)   { vkDestroyImageView(machine->device, swapchain->depth_view, NULL);   swapchain->depth_view = VK_NULL_HANDLE; }
-    if (swapchain->depth_image)  { vkDestroyImage(machine->device, swapchain->depth_image, NULL);      swapchain->depth_image = VK_NULL_HANDLE; }
-    if (swapchain->depth_memory) { vkFreeMemory(machine->device, swapchain->depth_memory, NULL);       swapchain->depth_memory = VK_NULL_HANDLE; }
     // swapchain
     if (swapchain->swapchain) {
         vkDestroySwapchainKHR(machine->device, swapchain->swapchain, NULL);
@@ -278,3 +300,4 @@ static void recreate_swapchain(struct Machine* machine, struct Swapchain* swapch
     destroy_swapchain(machine, swapchain);
     *swapchain = create_swapchain(machine, format, colorspace);
 }
+#endif

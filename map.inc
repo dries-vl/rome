@@ -147,7 +147,7 @@ static void create_detail_region(
     if (height_data_len >= 12 &&
         memcmp(height_data, "\xABKTX 20\xBB\r\n\x1A\n", 12) == 0) {
         printf("height_data is KTX2, expected raw grayscale bytes\n");
-        _exit(0);
+        exit(0);
     }
     if (height_data_len < (__SIZE_TYPE__)(DETAIL_SRC_W * DETAIL_SRC_H)) {
         printf("height_data is smaller than expected (%zu < %d)\n",

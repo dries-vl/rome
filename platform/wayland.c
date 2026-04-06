@@ -1,5 +1,5 @@
-#ifdef __linux__
 #include "platform.h"
+#if defined(__linux__) && USE_DRM_KMS == 0
 
 #include "vendor/wayland-client.h"
 #include "vendor/xdg-shell-client-protocol.h"
@@ -16,6 +16,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <poll.h>
 
 static clockid_t clockid;
 
@@ -635,9 +636,25 @@ int pf_window_visible(void) { return w.visible; }
 int pf_poll_events(void) {
     if (!w.display || !w.running) return 0;
 
-    /* Non-blocking event pump. */
-    wl_display_dispatch_pending(w.display);
-    wl_display_flush(w.display);
+    int fd = wl_display_get_fd(w.display);
+    struct pollfd pfd = {
+        .fd = fd,
+        .events = POLLIN,
+        .revents = 0
+    };
+
+    if (wl_display_prepare_read(w.display) == 0) {
+        int r = poll(&pfd, 1, 0);  // non-blocking
+        if (r > 0 && (pfd.revents & POLLIN)) {
+            wl_display_read_events(w.display);
+            wl_display_dispatch_pending(w.display);
+        } else {
+            wl_display_cancel_read(w.display);
+        }
+    } else {
+        wl_display_dispatch_pending(w.display);
+    }
+
     return w.running;
 }
 
@@ -671,7 +688,7 @@ void pf_create_window(char* app_name, void* ud, KEYBOARD_CB key_cb, MOUSE_CB mou
     w.display = wl_display_connect(NULL);
     if (!w.display) {
         printf("wl_display_connect failed\n");
-        _exit(1);
+        exit(1);
     }
 
     w.registry = wl_display_get_registry(w.display);
@@ -683,7 +700,7 @@ void pf_create_window(char* app_name, void* ud, KEYBOARD_CB key_cb, MOUSE_CB mou
 
     if (!w.compositor || !w.xdg_wm_base) {
         printf("missing compositor/xdg_wm_base\n");
-        _exit(1);
+        exit(1);
     }
 
     if (w.tearing_mgr) pf_timestamp("tearing-control protocol available");

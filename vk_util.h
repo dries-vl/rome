@@ -26,7 +26,7 @@ static const char* vk_result_str(VkResult r) {
     }
 }
 
-#define VK_CHECK(call) do{ VkResult _r=(call); if(_r!=VK_SUCCESS){ printf("vulkan error: %s on line @%s:%d\n",vk_result_str(_r),__FILE__,__LINE__); _exit(1);} }while(0)
+#define VK_CHECK(call) do{ VkResult _r=(call); if(_r!=VK_SUCCESS){ printf("vulkan error: %s on line @%s:%d\n",vk_result_str(_r),__FILE__,__LINE__); exit(1);} }while(0)
 
 static uint32_t find_memory_type_index(VkPhysicalDevice physical_device,uint32_t memory_type_bits,VkMemoryPropertyFlags required_properties) {
     VkPhysicalDeviceMemoryProperties mem_props;
@@ -37,7 +37,7 @@ static uint32_t find_memory_type_index(VkPhysicalDevice physical_device,uint32_t
         if (supported && has_props) return i;
     }
     printf("Failed to find suitable memory type.\n");
-    _exit(0); return 0;
+    exit(0); return 0;
 }
 
 #if DEBUG_VULKAN == 1
