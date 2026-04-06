@@ -1019,8 +1019,22 @@ int main(void) {
     unsigned int swap_image_index = 0;
 #endif
 
+    int paused = 0;
     while (pf_poll_events()) {
-
+        if (!pf_window_visible()) {
+            // if we don't see the window or lost drm leash in VT
+            if (paused == 0) {
+                pf_timestamp("pause");
+                paused = 1;
+            }
+            usleep(1000);
+            continue;
+        }
+        if (paused) { // we became visible again
+            pf_timestamp("unpause");
+            drm_present_note_reactivated(&present);
+            paused = 0;
+        }
         /* Ensure the single reused per-frame resource set is no longer in use. */
         VkSemaphoreWaitInfo wi = {
             .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
@@ -1787,6 +1801,9 @@ int main(void) {
 
         float start_present = (float)(pf_ns_now() - pf_ns_start()) / 1e6;
         if (!drm_present_queue_flip(&present, bb)) {
+            if (!pf_window_visible()) {
+                continue;
+            }
             printf("drm_present_queue_flip failed\n");
             break;
         }

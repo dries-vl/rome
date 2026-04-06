@@ -3,7 +3,7 @@
 // SETTINGS
 #define APP_NAME "Rome"
 #define DEBUG_VULKAN 0
-#define DEBUG_APP 1
+#define DEBUG_APP 0
 #define DEBUG_CPU 0
 
 // VULKAN

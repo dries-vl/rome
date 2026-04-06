@@ -413,6 +413,14 @@ int drm_present_queue_flip(struct DrmPresent *p, struct ImportedScanoutImage *im
     return 1;
 }
 
+void drm_present_note_reactivated(struct DrmPresent *p) {
+    p->first_modeset_done = 0;
+    p->pending_flip = 0;
+    for (int i = 0; i < 2; ++i) {
+        p->images[i].in_flight = 0;
+    }
+}
+
 void drm_present_handle_drm_event(struct DrmPresent *p) {
     drmEventContext ev = {
         .version = DRM_EVENT_CONTEXT_VERSION,
