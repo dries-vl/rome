@@ -118,7 +118,7 @@ static int prefer_device_type_bonus(VkPhysicalDeviceType t) {
 static int drm_fd_matches_physical_device(VkPhysicalDevice dev, int drm_fd) {
     struct stat st;
     if (fstat(drm_fd, &st) != 0) {
-        printf("fstat(pf_drm_fd)\n");
+        printf("fstat(drm_fd)\n");
         return 0;
     }
 
@@ -326,7 +326,7 @@ struct Machine create_machine(void) {
             continue;
 
 #if defined(__linux__) && USE_DRM_KMS == 1
-        if (!drm_fd_matches_physical_device(dev, pf_drm_fd())) {
+        if (!drm_fd_matches_physical_device(dev, drm_fd())) {
             printf("  Rejected: Vulkan physical device does not match selected DRM node.\n");
             continue;
         }

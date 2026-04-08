@@ -33,6 +33,10 @@ struct push_constants {
 };
 [[vk::push_constant]] push_constants PUSH_CONSTANTS;
 
+float3 rgb(uint c) {
+    return float3((c >> 16) & 255, (c >> 8) & 255, c & 255) * (1.0 / 255.0);
+}
+
 static const float d[4] = { 1024.0, 256.0, 64.0, 16.0 };
 uint choose_lod_step(float distance, float radius) {
     if (radius <= 0) radius = 10.0;
@@ -44,7 +48,7 @@ uint choose_lod_step(float distance, float radius) {
     return 0;
 }
 
-static const float SEA_LEVEL = 64.0f;
+static const float SEA_LEVEL = 16.0f;
 static const float TILE_WIDTH = 128.0;
 static const float TILES_PER_CHUNK = 8.0; // width
 static const float CHUNKS_PLAYABLE = 4.0; // width
@@ -64,24 +68,14 @@ float chunk_height_at_uv(float2 uv, bool fs) {
         // h = TEXTURES[2].Sample(uv).x * 1000000.0f;
         // detail = TEXTURES[4].Sample(uv).x;
     // } else {
-        h = DATA[1].SampleLevel(uv, 0).x * 400000.0f;
+        h = DATA[1].SampleLevel(uv, 0).x * 500000.0f;
+        //int tr = (int)round(DATA[0].Load(int3(int2(uv * 640.0), 0)).r * 255.0);
+        //if (tr > 0) h += 10000.0f;
         detail = TEXTURES[4].SampleLevel(uv, 0).x;
     // }
     // optional micro detail
-    h += (detail - 0.25f) * 1000.0f;
-    // sea plane height in same units as h
-    // signed height relative to sea
-    float d = h - SEA_LEVEL;
-    // beach band width
-    float beachWidth = 4000.0f;
-    // 0 at sea level edge, 1 away from coast, symmetric
-    float coast = saturate(abs(d) / beachWidth);
-    // strongest exactly near coast, fades away inland and offshore
-    float beachShape = 1.0f - coast;
-    beachShape = beachShape * beachShape;
-    // flatten coast slightly into a gentler transition
-    h -= beachShape * 2000.0f;
-    return h;
+        h += (detail - 0.25f) * 500.0f;
+        return h;
 }
 
 float3 get_camera_position() {
@@ -236,7 +230,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         if (object_id >= object_count) return; // early out
 
         // unpack object position and move to camera space
-        object_type object_type = CHUNKS[chunk_id].object_type;
+        object_type object_type = (object_type) CHUNKS[chunk_id].object_type;
         float3 position = float3(0);
         float3 chunk_position = float3(0);
         // todo: this code is totally busted, changing minor things makes terrain disappear; memory issue in prefix pass (?)
@@ -605,7 +599,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
             p = FENCE_V[FENCE_I[VERTEX_ID]];
         else {
             p = SEA_V[SEA_I[VERTEX_ID]];
-            p.y += 5.0 * sin(u.time);
+            p.y += 1.0 * sin(u.time);
         }
         float3 d = p - (get_camera_position() / 10.0);
         // yaw + pitch
@@ -916,24 +910,32 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
             float4 t_color = (tex1 + lerp(tex0, tex2, lodFract)) * 0.5;
             // t_color.rgb += (color / 2); // show actual triangle primitives
 
-            float h = i.h / 100.0f;              // same units as your ddx/ddy normal test
+            float h = i.h / 100.0f;
             float d = h - SEA_LEVEL;
+            const float S = 0.2f;
+
             // masks
-            float underwater = 1.0f - smoothstep(-40.0f,   0.0f, d);
-            float shallow    = 1.0f - smoothstep(-100.0f, -5.0f, d);
-            float wet        = 1.0f - smoothstep(   0.0f,  20.0f, d);
-            float land       =        smoothstep( -5.0f,  40.0f, d);
-            float beach      =        smoothstep(  -2.0f,  17.0f, d) * (1.0f - smoothstep(40.0f, 90.0f, d));
+            float underwater = 1.0f - smoothstep(-40.0f * S,   0.0f * S, d);
+            float shallow    = 1.0f - smoothstep(-100.0f * S, -2.0f * S, d);
+            float wet        = 1.0f - smoothstep(   0.0f * S,  8.0f * S, d);
+            float land       =        smoothstep( -5.0f * S,  40.0f * S, d);
+            float beach      =        smoothstep(  -2.0f * S,  2.0f * S, d)
+                                   * (1.0f - smoothstep(2.0f * S, 5.0f * S, d));
+
             float3 sand  = float3(0.78, 0.74, 0.62);
             float3 grass = t_color.rgb;
             float3 rock  = float3(0.42, 0.40, 0.38);
+
             float slope = 1.0f - saturate(i.normal.y);
             float rockiness = smoothstep(0.05f, 0.25f, slope);
+
             float3 landColor = lerp(sand, grass, land);
-            landColor *= lerp(0.35.xxx, 1.0.xxx, 1.0 - wet);
             landColor = lerp(landColor, float3(0.10, 0.24, 0.34), shallow * 0.75);
             landColor = lerp(landColor, sand, beach * 0.85);
+            landColor *= lerp(0.35.xxx, 1.0.xxx, 1.0 - wet);
+
             float3 terrainColor = lerp(landColor, rock, rockiness);
+
             o.color.rgb = terrainColor;
         }
 
@@ -1002,14 +1004,14 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         //     i.normal = 0;
         // }
         // if (!i.is_chunk) o.color.xyz = color;
-        uint bucket_id = get_bucket_id(i.world_pos.x + 2048, i.world_pos.y + 2048);
-        uint bucket_count = BUCKETS[bucket_id].ids[0];
-        if (bucket_count != 0) {
-            if (bucket_count < 15) {
-                o.color.g *= 1.0 + (bucket_count * 0.2);
-            } else {
-                o.color.b *= 1.0 + (bucket_count * 0.2);
-            }
+        // uint bucket_id = get_bucket_id(i.world_pos.x + 2048, i.world_pos.y + 2048);
+        // uint bucket_count = BUCKETS[bucket_id].ids[0];
+        // if (bucket_count != 0) {
+            // if (bucket_count < 15) {
+                // o.color.g *= 1.0 + (bucket_count * 0.2);
+            // } else {
+                // o.color.b *= 1.0 + (bucket_count * 0.2);
+            // }
             // uint2 pix = (uint2)i.pos.xy;
             // uint v = (pix.x & 3) | ((pix.y & 3) << 2);
             // uint unit_id = BUCKETS[bucket_id].ids[v];
@@ -1017,7 +1019,7 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
             // float distance = distance(i.world_pos, float2(object.x, object.z)) / 10.0;
             // if (distance < 0.5)
                 // o.color.g *= (distance * 10.0);
-        }
+        // }
         // o.color *= 1.0 - saturate(i.h * 0.00025);
     }
 
@@ -1049,8 +1051,21 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
     }
 
     if (PUSH_CONSTANTS.mode == mode.SEA_MODE) {
-        float terrainH = chunk_height_at_uv(i.uv + (px_size / 2), true) / 100.0f;
-        float depth = max(0.0f, SEA_LEVEL - terrainH);
+        float h = chunk_height_at_uv(i.uv + (px_size / 2), true);
+        // sea plane height in same units as h
+        // signed height relative to sea
+        float d = h - SEA_LEVEL;
+        // beach band width
+        float beachWidth = 10000.0f;
+        // 0 at sea level edge, 1 away from coast, symmetric
+        float coast = saturate(abs(d) / beachWidth);
+        // strongest exactly near coast, fades away inland and offshore
+        float beachShape = 1.0f - coast;
+        beachShape = beachShape * beachShape;
+        // flatten coast slightly into a gentler transition
+        h -= beachShape * 20000.0f;
+        float terrainH = h / 200.0f;
+        float depth = max(0.0f, (SEA_LEVEL) - terrainH);
         float shallowW = 1.0f - smoothstep(0.0f, 40.0f, depth);
         float deepW    = smoothstep(10.0f, 120.0f, depth);
         float3 shallowColor = float3(0.22, 0.48, 0.50);
@@ -1108,34 +1123,36 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         // o.color = map;
 
         // OUTLINING THICKNESS
-        float2 f = frac(p);
-        float t = 0.01;        // thickness
-        float feather = 0.01; // softness
-        float px_p = max(fwidth(p.x), fwidth(p.y)); // how much does p change between two pixels
-        // MEASURING GRID
-        float grid_1m = min(min(1.0 - abs(i.world_pos.x % 1.0), abs(i.world_pos.x % 1.0)), min(1.0 - abs(i.world_pos.y % 1.0), abs(i.world_pos.y % 1.0)));
-        float grid_4m = min(min(4.0 - abs(i.world_pos.x % 4.0), abs(i.world_pos.x % 4.0)), min(4.0 - abs(i.world_pos.y % 4.0), abs(i.world_pos.y % 4.0))) / 4.0;
-        float m1 = 1.0 - smoothstep(t - feather, t + feather, grid_1m);
-        float m4 = 1.0 - smoothstep(t - feather, t + feather, grid_4m);
-        float enable_measure = smoothstep(0, px_p, t / 2); // 1 when change in grid position for one pixel is smaller than width t
-        float measure_mask = enable_measure * saturate(m1 + m4); // gradually dissolve the grid
-        o.color.rgb = lerp(o.color.rgb, 0.025.xxx, measure_mask);
-        // QUAD OUTLINES
-        const float INV_SQRT5_TIMES_2 = 0.894427191; // 2/sqrt(5)
-        float dU = min(f.x, 1.0 - f.x) * INV_SQRT5_TIMES_2;
-        float dV = min(f.y, 1.0 - f.y);
-        float dDiag = (odd_row && i.is_chunk)
-            ? abs((f.x + f.y - 1.0)) * INV_SQRT5_TIMES_2
-            : abs(f.x - f.y) * INV_SQRT5_TIMES_2;
-        float dEdge = min(dU, min(dV, dDiag));
-        float2 nearestV = round(p);
-        float d = length(p - nearestV);
-        float point = 1.0 - smoothstep((t * 4) - feather, (t * 4) + feather, d);
-        float outerLine = 1.0 - smoothstep(t - feather, t + feather, dEdge);
-        float diagLine = 1.0 - smoothstep(t - feather, t + feather, dDiag);
-        float enable = smoothstep(0, px_p, t); // 1 when change in grid position for one pixel is smaller than width t
-        float mask = enable * saturate(point + outerLine + diagLine); // gradually dissolve the grid
-        o.color.rgb = lerp(o.color.rgb, 0.0.xxx, mask);
+        if (0) {
+            float2 f = frac(p);
+            float t = 0.01;        // thickness
+            float feather = 0.01; // softness
+            float px_p = max(fwidth(p.x), fwidth(p.y)); // how much does p change between two pixels
+            // MEASURING GRID
+            float grid_1m = min(min(1.0 - abs(i.world_pos.x % 1.0), abs(i.world_pos.x % 1.0)), min(1.0 - abs(i.world_pos.y % 1.0), abs(i.world_pos.y % 1.0)));
+            float grid_4m = min(min(4.0 - abs(i.world_pos.x % 4.0), abs(i.world_pos.x % 4.0)), min(4.0 - abs(i.world_pos.y % 4.0), abs(i.world_pos.y % 4.0))) / 4.0;
+            float m1 = 1.0 - smoothstep(t - feather, t + feather, grid_1m);
+            float m4 = 1.0 - smoothstep(t - feather, t + feather, grid_4m);
+            float enable_measure = smoothstep(0, px_p, t / 2); // 1 when change in grid position for one pixel is smaller than width t
+            float measure_mask = enable_measure * saturate(m1 + m4); // gradually dissolve the grid
+            o.color.rgb = lerp(o.color.rgb, 0.025.xxx, measure_mask);
+            // QUAD OUTLINES
+            const float INV_SQRT5_TIMES_2 = 0.894427191; // 2/sqrt(5)
+            float dU = min(f.x, 1.0 - f.x) * INV_SQRT5_TIMES_2;
+            float dV = min(f.y, 1.0 - f.y);
+            float dDiag = (odd_row && i.is_chunk)
+                ? abs((f.x + f.y - 1.0)) * INV_SQRT5_TIMES_2
+                : abs(f.x - f.y) * INV_SQRT5_TIMES_2;
+            float dEdge = min(dU, min(dV, dDiag));
+            float2 nearestV = round(p);
+            float d = length(p - nearestV);
+            float point = 1.0 - smoothstep((t * 4) - feather, (t * 4) + feather, d);
+            float outerLine = 1.0 - smoothstep(t - feather, t + feather, dEdge);
+            float diagLine = 1.0 - smoothstep(t - feather, t + feather, dDiag);
+            float enable = smoothstep(0, px_p, t); // 1 when change in grid position for one pixel is smaller than width t
+            float mask = enable * saturate(point + outerLine + diagLine); // gradually dissolve the grid
+            o.color.rgb = lerp(o.color.rgb, 0.0.xxx, mask);
+        }
 
         // slope
         // float slope = 1.0 - saturate(dot(i.normal, float3(0,1,0)));
@@ -1167,6 +1184,9 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         }
 
         o.color.rgb *= light * slopeOcc;
+        //int tr = (int)round(DATA[0].Load(int3(int2((i.uv + (px_size / 2)) * 640.0), 0)).r * 255.0);
+        //if (tr != 0)
+            //o.color.rgb = lerp(o.color.rgb, rgb(terrain_colors[tr]), 0.5);
     }
 
     // fade to fog at distance to avoid cutoff, seems like it continues further

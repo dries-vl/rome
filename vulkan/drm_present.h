@@ -1,6 +1,6 @@
 #pragma once
+#if defined(__linux__)
 #include "../platform/platform.h"
-#if defined(__linux__) && USE_DRM_KMS == 1
 
 #include <errno.h>
 #include <stdio.h>
@@ -259,7 +259,7 @@ static void destroy_imported_image(struct Machine *m, struct ImportedScanoutImag
         img->dma_buf_fd[i] = -1;
     }
 
-    if (img->fb_id) drmModeRmFB(pf_drm_fd(), img->fb_id);
+    if (img->fb_id) drmModeRmFB(drm_fd(), img->fb_id);
     if (img->bo) gbm_bo_destroy(img->bo);
 
     memset(img, 0, sizeof(*img));
@@ -267,10 +267,10 @@ static void destroy_imported_image(struct Machine *m, struct ImportedScanoutImag
 
 int drm_present_init(struct DrmPresent *p, struct Machine *m) {
     memset(p, 0, sizeof(*p));
-    p->drm_fd = pf_drm_fd();
-    p->connector_id = pf_drm_connector_id();
-    p->crtc_id = pf_drm_crtc_id();
-    p->mode = *(const drmModeModeInfo *)pf_drm_mode();
+    p->drm_fd = drm_fd();
+    p->connector_id = drm_connector_id();
+    p->crtc_id = drm_crtc_id();
+    p->mode = *(const drmModeModeInfo *)drm_mode();
     p->current_front = -1;
 
     p->gbm = gbm_create_device(p->drm_fd);

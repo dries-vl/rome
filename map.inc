@@ -9,11 +9,11 @@
 #endif
 
 #ifndef DETAIL_REGION_W
-#define DETAIL_REGION_W 80
+#define DETAIL_REGION_W 320
 #endif
 
 #ifndef DETAIL_REGION_H
-#define DETAIL_REGION_H 80
+#define DETAIL_REGION_H 320
 #endif
 
 #ifndef DETAIL_UPSCALED_W
@@ -32,8 +32,8 @@ extern const unsigned char terrain_data[];
 extern const unsigned char terrain_data_end[];
 #define terrain_data_len ((__SIZE_TYPE__)(terrain_data_end - terrain_data))
 
-char g_detail_terrain[DETAIL_UPSCALED_W * DETAIL_UPSCALED_H];
-char g_detail_height[DETAIL_UPSCALED_W * DETAIL_UPSCALED_H];
+unsigned char g_detail_terrain[DETAIL_UPSCALED_W * DETAIL_UPSCALED_H];
+unsigned char g_detail_height[DETAIL_UPSCALED_W * DETAIL_UPSCALED_H];
 
 static int detail_clampi(int v, int lo, int hi) {
     if (v < lo) return lo;
@@ -47,8 +47,54 @@ static float detail_clampf(float v, float lo, float hi) {
     return v;
 }
 
-static char detail_sample_bilinear_u8(
-    const char* src,
+static unsigned char detail_sample_mode_u8(
+    const unsigned char* src,
+    int src_w,
+    int src_h,
+    float sx,
+    float sy,
+    float radius
+) {
+    int cx = (int)floorf(sx + 0.5f);
+    int cy = (int)floorf(sy + 0.5f);
+
+    int r = (int)round(radius);
+
+    int counts[256];
+    memset(counts, 0, sizeof(counts));
+
+    int best_count = -1;
+    unsigned char best_value = 0;
+
+    for (int dy = -r; dy <= r; ++dy) {
+        for (int dx = -r; dx <= r; ++dx) {
+            float px = (float)cx + (float)dx;
+            float py = (float)cy + (float)dy;
+
+            float ddx = px - sx;
+            float ddy = py - sy;
+            float dist2 = ddx * ddx + ddy * ddy;
+
+            if (dist2 > radius * radius) continue;
+
+            int ix = detail_clampi((int)px, 0, src_w - 1);
+            int iy = detail_clampi((int)py, 0, src_h - 1);
+
+            unsigned char v = src[iy * src_w + ix];
+            int c = ++counts[v];
+
+            if (c > best_count) {
+                best_count = c;
+                best_value = v;
+            }
+        }
+    }
+
+    return best_value;
+}
+
+static unsigned char detail_sample_bilinear_u8(
+    const unsigned char* src,
     int src_w,
     int src_h,
     float x,
@@ -80,7 +126,44 @@ static char detail_sample_bilinear_u8(
     int iv = (int)(v + 0.5f);
     if (iv < 0) iv = 0;
     if (iv > 255) iv = 255;
-    return (char)iv;
+    return (unsigned char)iv;
+}
+
+static void detail_resample_region_mode_u8(
+    const unsigned char* src,
+    int src_w,
+    int src_h,
+    int center_x,
+    int center_y,
+    int region_w,
+    int region_h,
+    unsigned char* dst,
+    int dst_w,
+    int dst_h,
+    float radius
+) {
+    int left = center_x - (region_w / 2);
+    int top  = center_y - (region_h / 2);
+
+    int max_left = src_w - region_w;
+    int max_top  = src_h - region_h;
+
+    if (max_left < 0) max_left = 0;
+    if (max_top < 0) max_top = 0;
+
+    left = detail_clampi(left, 0, max_left);
+    top  = detail_clampi(top, 0, max_top);
+
+    for (int y = 0; y < dst_h; ++y) {
+        float sy = (float)top + (((float)y + 0.5f) * (float)region_h / (float)dst_h) - 0.5f;
+
+        for (int x = 0; x < dst_w; ++x) {
+            float sx = (float)left + (((float)x + 0.5f) * (float)region_w / (float)dst_w) - 0.5f;
+
+            dst[y * dst_w + x] = detail_sample_mode_u8(
+                src, src_w, src_h, sx, sy, radius);
+        }
+    }
 }
 
 /*
@@ -97,14 +180,14 @@ So the covered source texels are:
 That region is then resampled to 641x641.
 */
 static void detail_resample_region_u8(
-    const char* src,
+    const unsigned char* src,
     int src_w,
     int src_h,
     int center_x,
     int center_y,
     int region_w,
     int region_h,
-    char* dst,
+    unsigned char* dst,
     int dst_w,
     int dst_h
 ) {
@@ -159,7 +242,7 @@ static void create_detail_region(
             terrain_data_len, DETAIL_SRC_W * DETAIL_SRC_H);
     }
 
-    detail_resample_region_u8(
+    detail_resample_region_mode_u8(
         terrain_data,
         DETAIL_SRC_W,
         DETAIL_SRC_H,
@@ -169,7 +252,8 @@ static void create_detail_region(
         DETAIL_REGION_H,
         g_detail_terrain,
         DETAIL_UPSCALED_W,
-        DETAIL_UPSCALED_H
+        DETAIL_UPSCALED_H,
+        1.0f
     );
 
     detail_resample_region_u8(

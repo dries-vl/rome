@@ -89,9 +89,9 @@ void process_inputs() {
     int amount = 1;
     if (buttons[KEYBOARD_SHIFT]) { amount = 2; }
     if (buttons[KEYBOARD_W]) { move_forward(scaled(amount));}
-    if (buttons[KEYBOARD_R]) { move_forward(-scaled(amount)); }
+    if (buttons[KEYBOARD_S]) { move_forward(-scaled(amount)); }
     if (buttons[KEYBOARD_A]) { move_sideways(-scaled(amount)); }
-    if (buttons[KEYBOARD_S]) { move_sideways(scaled(amount)); }
+    if (buttons[KEYBOARD_D]) { move_sideways(scaled(amount)); }
     if (buttons[MOUSE_MARGIN_LEFT]) { cam_yaw -= buttons[MOUSE_MARGIN_LEFT]; }
     if (buttons[MOUSE_MARGIN_RIGHT]) { cam_yaw += buttons[MOUSE_MARGIN_RIGHT]; }
     if (buttons[MOUSE_MARGIN_TOP]) { cam_pitch -= buttons[MOUSE_MARGIN_TOP]; }
@@ -116,6 +116,7 @@ void process_inputs() {
 int main(void) {
     // setup the platform window
     pf_time_reset();
+    // redirect logging to a file
     setvbuf(stdout, NULL, _IOFBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     freopen("rome.log", "w", stdout);
@@ -329,7 +330,6 @@ int main(void) {
 #endif
 #if USE_DISCRETE_GPU == 0 && !defined(_WIN32) // set env to avoid loading nvidia icd (1000ms)
     extern int putenv(const char*);
-    extern char* getenv(const char*);
     putenv((char*)"VK_DRIVER_FILES=/usr/share/vulkan/icd.d/intel_icd.x86_64.json");
     putenv((char*)"VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/intel_icd.x86_64.json");
     pf_timestamp("Setup environment");
@@ -690,7 +690,7 @@ int main(void) {
 
     // UPLOAD TEXTURES
     create_textures(&machine, command_pool);
-    create_detail_region(531, 1041); // fills in the arrays
+    create_detail_region(800, 600); // fills in the arrays
     upload_detail_texture_pair(&machine, command_pool,
         g_detail_terrain, g_detail_height, DETAIL_UPSCALED_W, DETAIL_UPSCALED_H);
 
@@ -1001,28 +1001,26 @@ int main(void) {
     }
 #endif
 
-#if USE_DRM_KMS == 1
+    struct Swapchain swapchain;
     struct DrmPresent present;
-    if (!drm_present_init(&present, &machine)) {
-        printf("drm_present_init failed\n");
-        exit(1);
+    if (DRM_KMS) {
+        if (!drm_present_init(&present, &machine)) {
+            printf("drm_present_init failed\n");
+            exit(1);
+        }
+    } else {
+        swapchain = create_swapchain(&machine, color_format, color_space);
     }
     struct CommonTargets targets = create_targets(&machine);
-#else
-    struct Swapchain swapchain = create_swapchain(&machine, format.format, format.colorSpace);
-#endif
 
     unsigned long long timeline_value = 0;
     unsigned long long frame_id = 0;
 
-#if USE_DRM_KMS == 0
-    unsigned int swap_image_index = 0;
-#endif
+    unsigned int swap_image_index = 0; // only used for non-drm path
 
     int paused = 0;
     while (pf_poll_events()) {
-        if (!pf_window_visible()) {
-            // if we don't see the window or lost drm leash in VT
+        if (!pf_window_visible() && frame_id > 0) { // if we don't see the window or lost drm leash in VT
             if (paused == 0) {
                 pf_timestamp("pause");
                 paused = 1;
@@ -1044,53 +1042,55 @@ int main(void) {
         };
         VK_CHECK(vkWaitSemaphores(machine.device, &wi, UINT64_MAX));
 
-#if USE_DRM_KMS == 1
-        /* Drain any pending KMS page-flip event first. */
-        if (present.pending_flip) {
-            drm_present_handle_drm_event(&present);
+        int image_index;
+        VkImage color_image;
+        VkImageView color_view;
+        VkExtent2D render_extent;
+        struct ImportedScanoutImage *bb; // drm only
+        if (DRM_KMS) {
+            /* Drain any pending KMS page-flip event first. */
+            if (present.pending_flip) {
+                drm_present_handle_drm_event(&present);
+            }
+
+            bb = drm_present_acquire_backbuffer(&present);
+            if (!bb) {
+                /* Back buffer still busy; drain events and try again next tick. */
+                drm_present_handle_drm_event(&present);
+                continue;
+            }
+
+            image_index = drm_present_image_index(&present, bb);
+            color_image = bb->image;
+            color_view = bb->view;
+            render_extent = (VkExtent2D) { bb->width, bb->height };
+        } else {
+            float acquire = (float)(pf_ns_now() - pf_ns_start()) / 1e6;
+            VkResult acquire_result = vkAcquireNextImageKHR(
+                machine.device,
+                swapchain.swapchain,
+                UINT64_MAX,
+                acquire_image_semaphore,
+                VK_NULL_HANDLE,
+                &swap_image_index
+            );
+            float acquired = (float)(pf_ns_now() - pf_ns_start()) / 1e6;
+            printf("Waited for acquire for %.3f ms\n", acquired - acquire);
+
+            if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) {
+                recreate_swapchain(&machine, &swapchain, color_format, color_space);
+                continue;
+            }
+            if (acquire_result != VK_SUCCESS && acquire_result != VK_SUBOPTIMAL_KHR) {
+                printf("vkAcquireNextImageKHR failed: %s\n", vk_result_str(acquire_result));
+                break;
+            }
+
+            image_index = (int)swap_image_index;
+            color_image = swapchain.swapchain_images[swap_image_index];
+            color_view = swapchain.swapchain_views[swap_image_index];
+            render_extent = targets.extent;
         }
-
-        struct ImportedScanoutImage *bb = drm_present_acquire_backbuffer(&present);
-        if (!bb) {
-            /* Back buffer still busy; drain events and try again next tick. */
-            drm_present_handle_drm_event(&present);
-            continue;
-        }
-
-        const int image_index = drm_present_image_index(&present, bb);
-
-        VkImage color_image = bb->image;
-        VkImageView color_view = bb->view;
-        VkExtent2D render_extent = { bb->width, bb->height };
-
-#else
-        float acquire = (float)(pf_ns_now() - pf_ns_start()) / 1e6;
-        VkResult acquire_result = vkAcquireNextImageKHR(
-            machine.device,
-            swapchain.swapchain,
-            UINT64_MAX,
-            acquire_image_semaphore,
-            VK_NULL_HANDLE,
-            &swap_image_index
-        );
-        float acquired = (float)(pf_ns_now() - pf_ns_start()) / 1e6;
-        printf("Waited for acquire for %.3f ms\n", acquired - acquire);
-
-        if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) {
-            recreate_swapchain(&machine, &swapchain, format.format, format.colorSpace);
-            continue;
-        }
-        if (acquire_result != VK_SUCCESS && acquire_result != VK_SUBOPTIMAL_KHR) {
-            printf("vkAcquireNextImageKHR failed: %s\n", vk_result_str(acquire_result));
-            break;
-        }
-
-        const int image_index = (int)swap_image_index;
-
-        VkImage color_image = swapchain.swapchain_images[swap_image_index];
-        VkImageView color_view = swapchain.swapchain_views[swap_image_index];
-        VkExtent2D render_extent = targets.extent;
-#endif
 
         /* HANDLE INPUT */
         float input_start = (float)(pf_ns_now() - pf_ns_start()) / 1e6;
@@ -1714,21 +1714,21 @@ int main(void) {
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, targets.query_pool, q0 + Q_BLIT);
 #endif
 
-#if USE_DRM_KMS == 1
+        if (DRM_KMS) {
             VkImageMemoryBarrier2 to_scanout = img_barrier2(
                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, AC_CWR,
                 VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, 0,
                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
                 color_image, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1);
             cmd_barrier2(cmd, NULL, 0, NULL, 0, &to_scanout, 1);
-#else
+        } else {
             VkImageMemoryBarrier2 to_present = img_barrier2(
                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, AC_CWR,
                 VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, 0,
                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                 color_image, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1);
             cmd_barrier2(cmd, NULL, 0, NULL, 0, &to_present, 1);
-#endif
+        }
 
 #if DEBUG_APP == 1
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, targets.query_pool, q0 + Q_END);
@@ -1765,115 +1765,114 @@ int main(void) {
 
         timeline_value++;
 
-#if USE_DRM_KMS == 1
-        {
-            uint64_t signal_values[] = { timeline_value };
-            VkTimelineSemaphoreSubmitInfo tssi = {
-                .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
-                .signalSemaphoreValueCount = 1,
-                .pSignalSemaphoreValues = signal_values,
-                .waitSemaphoreValueCount = 0,
-                .pWaitSemaphoreValues = NULL
-            };
-            VkSubmitInfo submit_info = {
-                .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                .pNext = &tssi,
-                .waitSemaphoreCount = 0,
-                .pWaitSemaphores = NULL,
-                .pWaitDstStageMask = NULL,
-                .commandBufferCount = 1,
-                .pCommandBuffers = &cmd,
-                .signalSemaphoreCount = 1,
-                .pSignalSemaphores = &render_semaphore
-            };
-            VK_CHECK(vkQueueSubmit(machine.queue_graphics, 1, &submit_info, VK_NULL_HANDLE));
-        }
-
-{
-    VkSemaphoreWaitInfo render_done = {
-        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
-        .semaphoreCount = 1,
-        .pSemaphores = &render_semaphore,
-        .pValues = (uint64_t *) &timeline_value
-    };
-    VK_CHECK(vkWaitSemaphores(machine.device, &render_done, UINT64_MAX));
-}
-
-        float start_present = (float)(pf_ns_now() - pf_ns_start()) / 1e6;
-        if (!drm_present_queue_flip(&present, bb)) {
-            if (!pf_window_visible()) {
-                continue;
+        if (DRM_KMS) {
+            {
+                uint64_t signal_values[] = { timeline_value };
+                VkTimelineSemaphoreSubmitInfo tssi = {
+                    .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+                    .signalSemaphoreValueCount = 1,
+                    .pSignalSemaphoreValues = signal_values,
+                    .waitSemaphoreValueCount = 0,
+                    .pWaitSemaphoreValues = NULL
+                };
+                VkSubmitInfo submit_info = {
+                    .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                    .pNext = &tssi,
+                    .waitSemaphoreCount = 0,
+                    .pWaitSemaphores = NULL,
+                    .pWaitDstStageMask = NULL,
+                    .commandBufferCount = 1,
+                    .pCommandBuffers = &cmd,
+                    .signalSemaphoreCount = 1,
+                    .pSignalSemaphores = &render_semaphore
+                };
+                VK_CHECK(vkQueueSubmit(machine.queue_graphics, 1, &submit_info, VK_NULL_HANDLE));
             }
-            printf("drm_present_queue_flip failed\n");
-            break;
-        }
-        float done_present = (float)(pf_ns_now() - pf_ns_start()) / 1e6;
+
+            {
+                VkSemaphoreWaitInfo render_done = {
+                    .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+                    .semaphoreCount = 1,
+                    .pSemaphores = &render_semaphore,
+                    .pValues = (uint64_t *) &timeline_value
+                };
+                VK_CHECK(vkWaitSemaphores(machine.device, &render_done, UINT64_MAX));
+            }
+
+            float start_present = (float)(pf_ns_now() - pf_ns_start()) / 1e6;
+            if (!drm_present_queue_flip(&present, bb)) {
+                if (!pf_window_visible()) {
+                    continue;
+                }
+                printf("drm_present_queue_flip failed\n");
+                break;
+            }
+            float done_present = (float)(pf_ns_now() - pf_ns_start()) / 1e6;
 #if DEBUG_APP == 1
-        printf("Queued KMS page flip in %.3f ms\n", done_present - start_present);
+            printf("Queued KMS page flip in %.3f ms\n", done_present - start_present);
 #endif
+        } else {
+            {
+                VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+                VkSemaphore waits[]   = { acquire_image_semaphore };
+                VkSemaphore signals[] = { swapchain.present_ready_per_image[swap_image_index], render_semaphore };
 
-#else
-        {
-            VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-            VkSemaphore waits[]   = { acquire_image_semaphore };
-            VkSemaphore signals[] = { swapchain.present_ready_per_image[swap_image_index], render_semaphore };
+                uint64_t signal_values[] = { 0, timeline_value };
+                VkTimelineSemaphoreSubmitInfo tssi = {
+                    .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+                    .signalSemaphoreValueCount = 2,
+                    .pSignalSemaphoreValues = signal_values,
+                    .waitSemaphoreValueCount = 0,
+                    .pWaitSemaphoreValues = NULL
+                };
+                VkSubmitInfo submit_info = {
+                    .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                    .pNext = &tssi,
+                    .waitSemaphoreCount = 1,
+                    .pWaitSemaphores = waits,
+                    .pWaitDstStageMask = &wait_stage,
+                    .commandBufferCount = 1,
+                    .pCommandBuffers = &cmd,
+                    .signalSemaphoreCount = 2,
+                    .pSignalSemaphores = signals
+                };
+                VK_CHECK(vkQueueSubmit(machine.queue_graphics, 1, &submit_info, VK_NULL_HANDLE));
+            }
 
-            uint64_t signal_values[] = { 0, timeline_value };
-            VkTimelineSemaphoreSubmitInfo tssi = {
-                .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
-                .signalSemaphoreValueCount = 2,
-                .pSignalSemaphoreValues = signal_values,
-                .waitSemaphoreValueCount = 0,
-                .pWaitSemaphoreValues = NULL
-            };
-            VkSubmitInfo submit_info = {
-                .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                .pNext = &tssi,
+            VkPresentInfoKHR present_info = {
+                .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
                 .waitSemaphoreCount = 1,
-                .pWaitSemaphores = waits,
-                .pWaitDstStageMask = &wait_stage,
-                .commandBufferCount = 1,
-                .pCommandBuffers = &cmd,
-                .signalSemaphoreCount = 2,
-                .pSignalSemaphores = signals
+                .pWaitSemaphores = &swapchain.present_ready_per_image[swap_image_index],
+                .swapchainCount = 1,
+                .pSwapchains = &swapchain.swapchain,
+                .pImageIndices = &swap_image_index
             };
-            VK_CHECK(vkQueueSubmit(machine.queue_graphics, 1, &submit_info, VK_NULL_HANDLE));
-        }
-
-        VkPresentInfoKHR present_info = {
-            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-            .waitSemaphoreCount = 1,
-            .pWaitSemaphores = &swapchain.present_ready_per_image[swap_image_index],
-            .swapchainCount = 1,
-            .pSwapchains = &swapchain.swapchain,
-            .pImageIndices = &swap_image_index
-        };
 
 #if DEBUG_APP == 1
-        if (vkWaitForPresentKHR) {
-            VkPresentIdKHR present_id_info = {
-                .sType = VK_STRUCTURE_TYPE_PRESENT_ID_KHR,
-                .pNext = NULL,
-                .swapchainCount = 1,
-                .pPresentIds = (uint64_t *)&frame_id,
-            };
-            present_info.pNext = &present_id_info;
-        }
+            if (vkWaitForPresentKHR) {
+                VkPresentIdKHR present_id_info = {
+                    .sType = VK_STRUCTURE_TYPE_PRESENT_ID_KHR,
+                    .pNext = NULL,
+                    .swapchainCount = 1,
+                    .pPresentIds = (uint64_t *)&frame_id,
+                };
+                present_info.pNext = &present_id_info;
+            }
 #endif
 
-        float start_present = (float)(pf_ns_now() - pf_ns_start()) / 1e6;
-        VkResult present_res = vkQueuePresentKHR(machine.queue_present, &present_info);
-        float done_present = (float)(pf_ns_now() - pf_ns_start()) / 1e6;
-        printf("Waited for queue present for %.3f ms\n", done_present - start_present);
+            float start_present = (float)(pf_ns_now() - pf_ns_start()) / 1e6;
+            VkResult present_res = vkQueuePresentKHR(machine.queue_present, &present_info);
+            float done_present = (float)(pf_ns_now() - pf_ns_start()) / 1e6;
+            printf("Waited for queue present for %.3f ms\n", done_present - start_present);
 
-        if (present_res == VK_ERROR_OUT_OF_DATE_KHR || present_res == VK_SUBOPTIMAL_KHR) {
-            recreate_swapchain(&machine, &swapchain, format.format, format.colorSpace);
-            continue;
-        } else if (present_res != VK_SUCCESS) {
-            printf("vkQueuePresentKHR failed: %d\n", present_res);
-            break;
+            if (present_res == VK_ERROR_OUT_OF_DATE_KHR || present_res == VK_SUBOPTIMAL_KHR) {
+                recreate_swapchain(&machine, &swapchain, color_format, color_format);
+                continue;
+            } else if (present_res != VK_SUCCESS) {
+                printf("vkQueuePresentKHR failed: %d\n", present_res);
+                break;
+            }
         }
-#endif
 
 #if DEBUG_APP == 1
 #if USE_DRM_KMS == 0
@@ -1978,9 +1977,7 @@ int main(void) {
         frame_id++;
     }
 
-#if USE_DRM_KMS == 1
-    drm_present_destroy(&present, &machine);
-#endif
+    if (DRM_KMS) drm_present_destroy(&present, &machine);
     pf_destroy_window();
 
     return 0;

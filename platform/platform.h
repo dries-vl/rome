@@ -15,8 +15,10 @@ enum BUTTON {
     KEYBOARD_F1, KEYBOARD_F2, KEYBOARD_F3, KEYBOARD_F4, KEYBOARD_F5, KEYBOARD_F6, KEYBOARD_F7, KEYBOARD_F8, KEYBOARD_F9, KEYBOARD_F10, KEYBOARD_F11, KEYBOARD_F12,
     BUTTON_COUNT
 };
+
 typedef void (*KEYBOARD_CB)(void*,enum BUTTON,enum BUTTON_STATE);
 typedef void (*MOUSE_CB)(void*,int,int,enum BUTTON,int);
+
 long long pf_ns_now(void);
 #ifdef _WIN32
 long long pf_ticks_to_ns(long long); // on Windows the ticks still need to be converted to ns
@@ -24,6 +26,7 @@ long long pf_ticks_to_ns(long long); // on Windows the ticks still need to be co
 void pf_time_reset(void);
 long long pf_ns_start(void);
 void pf_timestamp(char*);
+
 int pf_window_width();
 int pf_window_height();
 void *pf_surface_or_hwnd();
@@ -33,10 +36,10 @@ int pf_poll_events();
 void pf_create_window(char*,void*,KEYBOARD_CB,MOUSE_CB);
 void pf_destroy_window();
 
-#define USE_DRM_KMS 1
-#if USE_DRM_KMS == 1
-int pf_drm_fd(void);
-unsigned int pf_drm_connector_id(void);
-unsigned int pf_drm_crtc_id(void);
-const void* pf_drm_mode(void);
+#ifdef __linux__
+extern int DRM_KMS;
+int drm_fd(void);
+unsigned int drm_connector_id(void);
+unsigned int drm_crtc_id(void);
+const void* drm_mode(void);
 #endif
