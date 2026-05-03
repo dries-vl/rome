@@ -22,6 +22,12 @@
 // VkBuffer buffer_uniforms; VkDeviceMemory memory_uniforms;
 // // plus two texture bindings == 21 bindings total
 //
+//
+// // input:
+// // description of which buffers, textures and uniforms we want
+// //
+//
+//
 // void create_buffers(
 //     VkDevice device, VkPhysicalDevice physical_device,
 //     VkQueue queue_graphics,

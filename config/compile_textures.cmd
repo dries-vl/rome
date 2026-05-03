@@ -18,10 +18,10 @@ for %%F in (data\*.png) do (
     ) else (
         set "out=static\win32\%%~nF.obj"
         if not exist "!out!" (
-            call :build_ktx "%%F" "%%~nF"
+            call :build_bc "%%F" "%%~nF"
         ) else (
             rem rebuild policy here
-            call :build_ktx "%%F" "%%~nF"
+            call :build_bc "%%F" "%%~nF"
         )
     )
 )

@@ -48,7 +48,7 @@ uint choose_lod_step(float distance, float radius) {
     return 0;
 }
 
-static const float SEA_LEVEL = 16.0f;
+static const float SEA_LEVEL = 3.0f;
 static const float TILE_WIDTH = 128.0;
 static const float TILES_PER_CHUNK = 8.0; // width
 static const float CHUNKS_PLAYABLE = 4.0; // width
@@ -68,13 +68,13 @@ float chunk_height_at_uv(float2 uv, bool fs) {
         // h = TEXTURES[2].Sample(uv).x * 1000000.0f;
         // detail = TEXTURES[4].Sample(uv).x;
     // } else {
-        h = DATA[1].SampleLevel(uv, 0).x * 500000.0f;
+        h = DATA[1].SampleLevel(uv, 0).x * 125000.0f;
         //int tr = (int)round(DATA[0].Load(int3(int2(uv * 640.0), 0)).r * 255.0);
         //if (tr > 0) h += 10000.0f;
-        detail = TEXTURES[4].SampleLevel(uv, 0).x;
+        //detail = TEXTURES[4].SampleLevel(uv, 0).x;
     // }
     // optional micro detail
-        h += (detail - 0.25f) * 500.0f;
+        //h += (detail - 0.25f) * 500.0f;
         return h;
 }
 
@@ -922,12 +922,16 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
             float beach      =        smoothstep(  -2.0f * S,  2.0f * S, d)
                                    * (1.0f - smoothstep(2.0f * S, 5.0f * S, d));
 
+            // terrain type
+            int tr = (int)round(DATA[0].Load(int3(int2((i.uv + (px_size / 2)) * 640.0), 0)).r * 255.0);
+            float3 grass = lerp(t_color.rgb, rgb(terrain_colors[tr]), 0.5);
+            // grass = DATA[1].Sample(i.uv).rgb;
+
             float3 sand  = float3(0.78, 0.74, 0.62);
-            float3 grass = t_color.rgb;
-            float3 rock  = float3(0.42, 0.40, 0.38);
+            float3 rock  = float3(0.72, 0.70, 0.78);
 
             float slope = 1.0f - saturate(i.normal.y);
-            float rockiness = smoothstep(0.05f, 0.25f, slope);
+            float rockiness = smoothstep(0.015f, 0.15f, slope);
 
             float3 landColor = lerp(sand, grass, land);
             landColor = lerp(landColor, float3(0.10, 0.24, 0.34), shallow * 0.75);
@@ -937,6 +941,7 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
             float3 terrainColor = lerp(landColor, rock, rockiness);
 
             o.color.rgb = terrainColor;
+
         }
 
         // COLOR THE EDGE RED
@@ -1065,7 +1070,7 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         // flatten coast slightly into a gentler transition
         h -= beachShape * 20000.0f;
         float terrainH = h / 200.0f;
-        float depth = max(0.0f, (SEA_LEVEL) - terrainH);
+        float depth = max(0.0f, (4 * SEA_LEVEL) - terrainH);
         float shallowW = 1.0f - smoothstep(0.0f, 40.0f, depth);
         float deepW    = smoothstep(10.0f, 120.0f, depth);
         float3 shallowColor = float3(0.22, 0.48, 0.50);
@@ -1123,7 +1128,7 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         // o.color = map;
 
         // OUTLINING THICKNESS
-        if (0) {
+        if (false) {
             float2 f = frac(p);
             float t = 0.01;        // thickness
             float feather = 0.01; // softness
@@ -1184,9 +1189,6 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         }
 
         o.color.rgb *= light * slopeOcc;
-        //int tr = (int)round(DATA[0].Load(int3(int2((i.uv + (px_size / 2)) * 640.0), 0)).r * 255.0);
-        //if (tr != 0)
-            //o.color.rgb = lerp(o.color.rgb, rgb(terrain_colors[tr]), 0.5);
     }
 
     // fade to fog at distance to avoid cutoff, seems like it continues further

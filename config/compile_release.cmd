@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 : '
 @echo off
-gcc main.c platform/win32.c static/win32/*.obj -luser32 -lgdi32 -lvulkan-1 -I"%VULKAN_SDK%\Include" -L"%VULKAN_SDK%\Lib" -O3 -DNDEBUG -march=x86-64-v3 -fomit-frame-pointer -flto -s -o rome.exe
+gcc main.c platform/win32.c vulkan/vk.c static/win32/*.obj -luser32 -lgdi32 -lvulkan-1 -I"%VULKAN_SDK%\Include" -L"%VULKAN_SDK%\Lib" -O3 -DNDEBUG -march=x86-64-v3 -fomit-frame-pointer -flto -s -o rome.exe
 goto :eof
 '
-gcc main.c platform/wayland.c static/linux/*.o -lwayland-client -lm -lxkbcommon -lvulkan -L. -O3 -DNDEBUG -march=x86-64-v3 -fomit-frame-pointer -flto -s -o rome
+gcc main.c platform/wayland.c vulkan/vk.c static/linux/*.o -lwayland-client -lm -lxkbcommon -lvulkan -L. -O3 -DNDEBUG -march=x86-64-v3 -fomit-frame-pointer -flto -s -o rome

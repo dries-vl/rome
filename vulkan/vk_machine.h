@@ -1,39 +1,4 @@
 #pragma once
-#if defined(__linux__) && USE_DRM_KMS == 1
-#include <sys/stat.h>
-#include <sys/sysmacros.h>
-#endif
-
-struct Machine {
-    VkInstance instance;
-
-#if !defined(__linux__) || USE_DRM_KMS == 0
-    VkSurfaceKHR surface;
-#endif
-
-    VkPhysicalDevice physical_device;
-    VkDevice device;
-
-#if DEBUG_VULKAN == 1
-    VkDebugUtilsMessengerEXT debug_messenger;
-#endif
-
-    uint32_t queue_family_graphics;
-    uint32_t queue_family_compute;
-
-#if !defined(__linux__) || USE_DRM_KMS == 0
-    uint32_t queue_family_present;
-#endif
-
-    VkQueue queue_graphics;
-    VkQueue queue_compute;
-
-#if !defined(__linux__) || USE_DRM_KMS == 0
-    VkQueue queue_present;
-#endif
-};
-
-#include "vulkan/drm_present.h"
 
 static int has_instance_layer(const char *name) {
     uint32_t count = 0;
@@ -106,8 +71,8 @@ static int rate_device_type(VkPhysicalDeviceType t) {
     }
 }
 
-static int prefer_device_type_bonus(VkPhysicalDeviceType t) {
-    if (USE_DISCRETE_GPU) {
+static int prefer_device_type_bonus(VkPhysicalDeviceType t, int use_discrete_gpu) {
+    if (use_discrete_gpu) {
         return (t == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) ? 10000 : 0;
     } else {
         return (t == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) ? 10000 : 0;
@@ -148,14 +113,14 @@ static int drm_fd_matches_physical_device(VkPhysicalDevice dev, int drm_fd) {
 }
 #endif
 
-struct Machine create_machine(void) {
+struct Machine create_machine(char *app_name, int use_discrete_gpu) {
     struct Machine machine;
     memset(&machine, 0, sizeof(machine));
 
     VkApplicationInfo app_info = {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-        .pApplicationName = APP_NAME,
-        .pEngineName = APP_NAME,
+        .pApplicationName = app_name,
+        .pEngineName = app_name,
         .apiVersion = VK_API_VERSION_1_3
     };
 
@@ -484,7 +449,7 @@ struct Machine create_machine(void) {
 
         int score = 0;
         score += rate_device_type(props.deviceType);
-        score += prefer_device_type_bonus(props.deviceType);
+        score += prefer_device_type_bonus(props.deviceType, use_discrete_gpu);
 
 #if !defined(__linux__) || USE_DRM_KMS == 0
         if (q_graphics == q_present) score += 50;

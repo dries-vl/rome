@@ -110,23 +110,29 @@ int DRM_KMS = 0;
 int pf_window_width() {
     return DRM_KMS ? drm_window_width() : wl_window_width();
 }
-
 int pf_window_height() {
     return DRM_KMS ? drm_window_height() : wl_window_height();
 }
-
 void *pf_surface_or_hwnd() {
     return DRM_KMS ? NULL : wl_surface_or_hwnd();
 }
-
 void *pf_display_or_instance() {
     return DRM_KMS ? NULL : wl_display_or_instance();
 }
-
 int pf_window_visible() {
     return DRM_KMS ? drm_window_visible() : wl_window_visible();
 }
-
+void pf_sleep(long long ms) {
+    usleep(ms * 10);
+}
+void pf_start_logging() {
+    // redirect logging to a file
+    setvbuf(stdout, NULL, _IOFBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    freopen("rome.log", "w", stdout);
+    freopen("rome.log", "a", stderr);
+    pf_timestamp("Start logging");
+}
 int pf_poll_events() {
     return DRM_KMS ? drm_poll_events() : wl_poll_events();
 }

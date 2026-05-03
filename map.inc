@@ -9,11 +9,11 @@
 #endif
 
 #ifndef DETAIL_REGION_W
-#define DETAIL_REGION_W 320
+#define DETAIL_REGION_W 641
 #endif
 
 #ifndef DETAIL_REGION_H
-#define DETAIL_REGION_H 320
+#define DETAIL_REGION_H 641
 #endif
 
 #ifndef DETAIL_UPSCALED_W

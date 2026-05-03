@@ -20,21 +20,24 @@ typedef void (*KEYBOARD_CB)(void*,enum BUTTON,enum BUTTON_STATE);
 typedef void (*MOUSE_CB)(void*,int,int,enum BUTTON,int);
 
 long long pf_ns_now(void);
+void pf_time_reset(void);
+long long pf_ns_start(void);
 #ifdef _WIN32
 long long pf_ticks_to_ns(long long); // on Windows the ticks still need to be converted to ns
 #endif
-void pf_time_reset(void);
-long long pf_ns_start(void);
+
+void pf_sleep(long long);
+void pf_start_logging(void);
 void pf_timestamp(char*);
 
+void pf_create_window(char*,void*,KEYBOARD_CB,MOUSE_CB);
 int pf_window_width();
 int pf_window_height();
 void *pf_surface_or_hwnd();
 void *pf_display_or_instance();
 int pf_window_visible();
-int pf_poll_events();
-void pf_create_window(char*,void*,KEYBOARD_CB,MOUSE_CB);
 void pf_destroy_window();
+int pf_poll_events();
 
 #ifdef __linux__
 extern int DRM_KMS;
