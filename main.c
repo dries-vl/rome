@@ -106,7 +106,7 @@ void apply_inputs() {
 
 #include "vulkan/vk.h"
 #include "vulkan/vk_util.h"
-#include "vulkan/drm_present.h"
+#include "vulkan/vk_drm.h"
 #include "vk_swapchain.h"
 #include "vk_texture.h"
 #include "vulkan/buffers.h"
@@ -392,8 +392,8 @@ int main(void) {
     color_format = chosen.format;
     color_space = chosen.colorSpace;
 #endif
-    #pragma endregion
-
+#pragma endregion
+{
     // can be created purely based on buffer and texture descriptions (~20ms create, ~250ms upload)
 #pragma region CREATE AND UPLOAD GPU BUFFERS AND TEXTURES
     // buffers
@@ -949,7 +949,7 @@ int main(void) {
 
     // destroy the shader module after using it
     vkDestroyShaderModule(machine.device, shader_module,  NULL);
-
+}
 #pragma region VULKAN SEMAPHORES
     // render semaphore (ensure only one frame is being worked on gpu-side)
     VkSemaphoreTypeCreateInfo type_info = {
